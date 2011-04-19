@@ -58,16 +58,16 @@ int main(int argc, char *argv[])
   char buffer[PCKT_LEN];
 
   struct tcpheader *tcp = (struct tcpheader *) (buffer);
-  struct sockaddr_in sin, din;
+  struct sockaddr_in din;
   int zero = 0;
   const int *val = &zero;
 
   memset(buffer, 0, PCKT_LEN);
 
-  if(argc != 5)
+  if(argc != 3)
   {
     printf("- Invalid parameters!!!\n");
-    printf("- Usage: %s <source hostname/IP> <source port> <target hostname/IP> <target port>\n", argv[0]);
+    printf("- Usage: %s <target IP> <target port>\n", argv[0]);
     exit(-1);
   }
 
@@ -84,25 +84,17 @@ int main(int argc, char *argv[])
   }
 
 // Address family
-  sin.sin_family = AF_INET;
   din.sin_family = AF_INET;
 
-// Source port, can be any, modify as needed
-  sin.sin_port = htons(atoi(argv[2]));
-  din.sin_port = htons(atoi(argv[4]));
-
-// Source IP, can be any, modify as needed
-  sin.sin_addr.s_addr = inet_addr(argv[1]);
-  din.sin_addr.s_addr = inet_addr(argv[3]);
+// destination IP
+  din.sin_addr.s_addr = inet_addr(argv[1]);
 
 
-// The TCP structure. The source port, spoofed, we accept through the command line
-
-//  tcp->tcph_srcport = htons(atoi(argv[2]));
+// The TCP structure.
 
 // The destination port, we accept through command line
 
-  tcp->tcph_destport = htons(atoi(argv[4]));
+  tcp->tcph_destport = htons(atoi(argv[2]));
   tcp->tcph_acknum = 0;
   tcp->tcph_dataoffset = 5; /* no tcp options -> 20 bytes/5 words */
   tcp->tcph_syn = 1;
@@ -123,7 +115,7 @@ int main(int argc, char *argv[])
     printf("setsockopt() is OK\n");
   }
 
-  printf("Using:::::Source IP: %s port: %u, Target IP: %s port: %u.\n", argv[1], atoi(argv[2]), argv[3], atoi(argv[4]));
+  printf("Using:::::Target IP: %s port: %u.\n", argv[1], atoi(argv[2]));
 
 // sendto() loop, send every 2 second for 50 counts
 
@@ -137,7 +129,7 @@ int main(int argc, char *argv[])
       assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_srcport),
                              sizeof(tcp->tcph_srcport)));
 
-    size_t numsent = sendto(sd, buffer, 4 * tcp->tcph_dataoffset, 0, (struct sockaddr *)&sin, sizeof(sin));
+    size_t numsent = sendto(sd, buffer, 4 * tcp->tcph_dataoffset, 0, (struct sockaddr *)&din, sizeof(din));
     if(numsent != sizeof (struct tcpheader))
     {
       perror("sendto() error");
