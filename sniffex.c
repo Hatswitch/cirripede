@@ -207,8 +207,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-/* default snap length (maximum bytes per packet to capture) */
-#define SNAP_LEN 1518
+// we only need upto the tcp sequence number
+#define SNAP_LEN (SIZE_ETHERNET + 60 + 2)
 
 /* ethernet headers are always exactly 14 bytes [1] */
 #define SIZE_ETHERNET 14
@@ -481,10 +481,12 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	
 	printf("   Src port: %d\n", ntohs(tcp->th_sport));
 	printf("   Dst port: %d\n", ntohs(tcp->th_dport));
+	printf("   seq num:  %d\n", ntohs(tcp->th_seq));
 	
 	/* define/compute tcp payload (segment) offset */
 	payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
 	
+#if 0
 	/* compute tcp payload (segment) size */
 	size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
 	
@@ -496,7 +498,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 		printf("   Payload (%d bytes):\n", size_payload);
 		print_payload(payload, size_payload);
 	}
-
+#endif
 return;
 }
 
@@ -507,7 +509,7 @@ int main(int argc, char **argv)
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 	pcap_t *handle;				/* packet capture handle */
 
-	char filter_exp[] = "ip";		/* filter expression [3] */
+	char filter_exp[] = "tcp";		/* filter expression [3] */
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
