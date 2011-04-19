@@ -212,7 +212,7 @@ int main(int argc, char *argv[])
   bail_null_msg(rspubkeybio, "can't open RS pubkey file");
 
   u_char rspubkey[CURVE25519_KEYSIZE] = {0};
-  bail_require_msg(BIO_read(rspubkeybio, rspubkey, sizeof rspubkey) != sizeof rspubkey,
+  bail_require_msg(BIO_read(rspubkeybio, rspubkey, sizeof rspubkey) == sizeof rspubkey,
                    "error reading RS pubkey");
 
   u_char myseckey[CURVE25519_KEYSIZE] = {0};
