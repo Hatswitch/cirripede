@@ -172,7 +172,7 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   bail_require(BIO_push(benc, ciphertextbio) == benc);
 
   // encrypt "hello"
-  const char str[] = "hello";
+  const char str[] = "hello-rs";
   int retval = BIO_write(benc, str, strlen(str));
   bail_require(retval == strlen(str));
   bail_require(1 == BIO_flush(benc));
@@ -217,6 +217,8 @@ int main(int argc, char *argv[])
 
   u_char myseckey[CURVE25519_KEYSIZE] = {0};
   gensecretkey(myseckey);
+  u_char mypubkey[CURVE25519_KEYSIZE] = {0};
+  computepublickey(mypubkey, myseckey);
 
   u_char sharedkey[CURVE25519_KEYSIZE] = {0};
   curve25519(sharedkey, myseckey, rspubkey);
@@ -276,15 +278,21 @@ int main(int argc, char *argv[])
 
 // sendto() loop, send every 2 second for 50 counts
 
+  const int numrequiredpackets = (CURVE25519_KEYSIZE + 4) / 4;
   unsigned int count;
-  for(count = 0; count < 5; count++)
+  for(count = 0; count < numrequiredpackets; count++)
   {
-      assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_seqnum),
-                             sizeof(tcp->tcph_seqnum)));
-      tcp->tcph_seqnum = htonl(tcp->tcph_seqnum);
+    if (count < (numrequiredpackets - 1)) {
+      // use the pub key
+      memcpy(&tcp->tcph_seqnum, mypubkey + (4 * count), 4);
+    }
+    else {
+      // use the ciphertext
+      memcpy(&tcp->tcph_seqnum, ciphertext, 4);
+    }
 
-      assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_srcport),
-                             sizeof(tcp->tcph_srcport)));
+    assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_srcport),
+                           sizeof(tcp->tcph_srcport)));
 
     size_t numsent = sendto(sd, buffer, 4 * tcp->tcph_dataoffset, 0, (struct sockaddr *)&din, sizeof(din));
     if(numsent != sizeof (struct tcpheader))
