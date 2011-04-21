@@ -1,3 +1,4 @@
+
 /*
  * sniffex.c
  *
@@ -212,7 +213,22 @@
 #include <assert.h>
 #include "openssl/ssl.h"
 #include "openssl/err.h"
+#include <getopt.h>
+#include <boost/lexical_cast.hpp>
+#include <boost/shared_ptr.hpp>
+#include <string>
+#include <iostream>
+
+extern "C" {
 #include "curve25519-20050915/curve25519.h"
+}
+
+using std::string;
+using std::cout;
+using std::endl;
+
+using boost::lexical_cast;
+using boost::shared_ptr;
 
 // we only need upto the tcp sequence number
 #define SNAP_LEN (SIZE_ETHERNET + 60 + 2)
@@ -344,6 +360,10 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
               u_char ciphertext[4])
 {
   int err = 0;
+  int retval = 0;
+  static const char str[] = "hello-rs";
+  BIO *ciphertextbio = NULL;
+  BIO *benc = NULL;
   /// generate key and iv for cipher
   u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
   u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
@@ -361,19 +381,18 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
     cipherkey, cipheriv);
   bail_require(keylen == cipher->key_len);
 
-  BIO *benc = BIO_new(BIO_f_cipher());
+  benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
 
   BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
 
-  BIO *ciphertextbio = BIO_new(BIO_s_mem());
+  ciphertextbio = BIO_new(BIO_s_mem());
   bail_null(ciphertextbio);
 
   bail_require(BIO_push(benc, ciphertextbio) == benc);
 
   // encrypt "hello"
-  const char str[] = "hello-rs";
-  int retval = BIO_write(benc, str, strlen(str));
+  retval = BIO_write(benc, str, strlen(str));
   bail_require(retval == strlen(str));
   bail_require(1 == BIO_flush(benc));
 
@@ -401,135 +420,6 @@ print_app_banner(void);
 
 void
 print_app_usage(void);
-
-/*
- * app name/banner
- */
-void
-print_app_banner(void)
-{
-
-	printf("%s - %s\n", APP_NAME, APP_DESC);
-	printf("%s\n", APP_COPYRIGHT);
-	printf("%s\n", APP_DISCLAIMER);
-	printf("\n");
-
-return;
-}
-
-/*
- * print help text
- */
-void
-print_app_usage(void)
-{
-
-	printf("Usage: %s <curve25519 secret file> [interface]\n", APP_NAME);
-	printf("\n");
-	printf("Options:\n");
-	printf("    interface    Listen on <interface> for packets.\n");
-	printf("\n");
-
-return;
-}
-
-/*
- * print data in rows of 16 bytes: offset   hex   ascii
- *
- * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
- */
-void
-print_hex_ascii_line(const u_char *payload, int len, int offset)
-{
-
-	int i;
-	int gap;
-	const u_char *ch;
-
-	/* offset */
-	printf("%05d   ", offset);
-	
-	/* hex */
-	ch = payload;
-	for(i = 0; i < len; i++) {
-		printf("%02x ", *ch);
-		ch++;
-		/* print extra space after 8th byte for visual aid */
-		if (i == 7)
-			printf(" ");
-	}
-	/* print space to handle line less than 8 bytes */
-	if (len < 8)
-		printf(" ");
-	
-	/* fill hex gap with spaces if not full line */
-	if (len < 16) {
-		gap = 16 - len;
-		for (i = 0; i < gap; i++) {
-			printf("   ");
-		}
-	}
-	printf("   ");
-	
-	/* ascii (if printable) */
-	ch = payload;
-	for(i = 0; i < len; i++) {
-		if (isprint(*ch))
-			printf("%c", *ch);
-		else
-			printf(".");
-		ch++;
-	}
-
-	printf("\n");
-
-return;
-}
-
-/*
- * print packet payload data (avoid printing binary data)
- */
-void
-print_payload(const u_char *payload, int len)
-{
-
-	int len_rem = len;
-	int line_width = 16;			/* number of bytes per line */
-	int line_len;
-	int offset = 0;					/* zero-based offset counter */
-	const u_char *ch = payload;
-
-	if (len <= 0)
-		return;
-
-	/* data fits on one line */
-	if (len <= line_width) {
-		print_hex_ascii_line(ch, len, offset);
-		return;
-	}
-
-	/* data spans multiple lines */
-	for ( ;; ) {
-		/* compute current line length */
-		line_len = line_width % len_rem;
-		/* print line */
-		print_hex_ascii_line(ch, line_len, offset);
-		/* compute total remaining */
-		len_rem = len_rem - line_len;
-		/* shift pointer to remaining bytes to print */
-		ch = ch + line_len;
-		/* add offset */
-		offset = offset + line_width;
-		/* check if we have line width chars or less */
-		if (len_rem <= line_width) {
-			/* print last line and get out */
-			print_hex_ascii_line(ch, len_rem, offset);
-			break;
-		}
-	}
-
-return;
-}
 
 /*
  * dissect/print packet
@@ -652,36 +542,69 @@ int main(int argc, char **argv)
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 	pcap_t *handle;				/* packet capture handle */
 
-	char filter_exp[] = "tcp port 443";		/* filter expression [3] */
+	string filter_exp = "tcp port ";		/* filter expression [3] */
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
 	int num_packets = 10;			/* number of packets to capture */
+    int opt;
+    int long_index;
+    u_short port = 0;
+    const char *seckeypath = NULL;
 
-	print_app_banner();
+    struct option long_options[] = {
+        {"port", required_argument, 0, 1000},
+        {"device", required_argument, 0, 1001},
+        {"curveseckey", required_argument, 0, 1002},
+        {0, 0, 0, 0},
+    };
+    while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
+    {
+        switch (opt) {
+        case 0:
+            if (long_options[long_index].flag != 0) {
+                break;
+            }
+            cout << "option " << long_options[long_index].name;
+            if (optarg) {
+                cout << " with arg " << optarg;
+            }
+            cout << endl;
+            break;
 
-    if (argc < 2) {
-		fprintf(stderr, "error: not enough command-line options\n\n");
-		print_app_usage();
-		exit(EXIT_FAILURE);
-	}
+        case 1000:
+            port = strtod(optarg, NULL);
+            break;
 
-    BIO *curvesecretfilebio = BIO_new_file(argv[1], "rb");
-    bail_null(curvesecretfilebio);
+        case 1001:
+            dev = optarg;
+            break;
+
+        case 1002:
+            seckeypath = optarg;
+            break;
+
+        default:
+            print_app_usage();
+            exit(-1);
+            break;
+        }
+    }
+
+    if (port == 0 || seckeypath == NULL) {
+        print_app_usage();
+        exit(-1);
+    }
+
+    filter_exp += lexical_cast<string>(port);
 
     u_char myseckey[CURVE25519_KEYSIZE] = {0};
+    BIO *curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+    bail_null(curvesecretfilebio);
+
     bail_require_msg(sizeof myseckey == BIO_read(curvesecretfilebio, myseckey, sizeof myseckey), "error reading secret curve key");
 
-	/* check for capture device name on command-line */
-	if (argc == 3) {
-		dev = argv[2];
-	}
-	else if (argc > 3) {
-		fprintf(stderr, "error: unrecognized command-line options\n\n");
-		print_app_usage();
-		exit(EXIT_FAILURE);
-	}
-	else {
+	if (dev == NULL) {
 		/* find a capture device if not specified on command-line */
 		dev = pcap_lookupdev(errbuf);
 		if (dev == NULL) {
@@ -702,7 +625,7 @@ int main(int argc, char **argv)
 	/* print capture info */
 	printf("Device: %s\n", dev);
 	printf("Number of packets: %d\n", num_packets);
-	printf("Filter expression: %s\n", filter_exp);
+	printf("Filter expression: %s\n", filter_exp.c_str());
 
 	/* open capture device */
 	handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
@@ -718,16 +641,16 @@ int main(int argc, char **argv)
 	}
 
 	/* compile the filter expression */
-	if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
+	if (pcap_compile(handle, &fp, filter_exp.c_str(), 0, net) == -1) {
 		fprintf(stderr, "Couldn't parse filter %s: %s\n",
-		    filter_exp, pcap_geterr(handle));
+                filter_exp.c_str(), pcap_geterr(handle));
 		exit(EXIT_FAILURE);
 	}
 
 	/* apply the compiled filter */
 	if (pcap_setfilter(handle, &fp) == -1) {
 		fprintf(stderr, "Couldn't install filter %s: %s\n",
-		    filter_exp, pcap_geterr(handle));
+                filter_exp.c_str(), pcap_geterr(handle));
 		exit(EXIT_FAILURE);
 	}
 
@@ -746,3 +669,131 @@ bail:
 return 0;
 }
 
+/*
+ * print packet payload data (avoid printing binary data)
+ */
+void
+print_payload(const u_char *payload, int len)
+{
+
+	int len_rem = len;
+	int line_width = 16;			/* number of bytes per line */
+	int line_len;
+	int offset = 0;					/* zero-based offset counter */
+	const u_char *ch = payload;
+
+	if (len <= 0)
+		return;
+
+	/* data fits on one line */
+	if (len <= line_width) {
+		print_hex_ascii_line(ch, len, offset);
+		return;
+	}
+
+	/* data spans multiple lines */
+	for ( ;; ) {
+		/* compute current line length */
+		line_len = line_width % len_rem;
+		/* print line */
+		print_hex_ascii_line(ch, line_len, offset);
+		/* compute total remaining */
+		len_rem = len_rem - line_len;
+		/* shift pointer to remaining bytes to print */
+		ch = ch + line_len;
+		/* add offset */
+		offset = offset + line_width;
+		/* check if we have line width chars or less */
+		if (len_rem <= line_width) {
+			/* print last line and get out */
+			print_hex_ascii_line(ch, len_rem, offset);
+			break;
+		}
+	}
+
+return;
+}
+
+/*
+ * app name/banner
+ */
+void
+print_app_banner(void)
+{
+
+	printf("%s - %s\n", APP_NAME, APP_DESC);
+	printf("%s\n", APP_COPYRIGHT);
+	printf("%s\n", APP_DISCLAIMER);
+	printf("\n");
+
+return;
+}
+
+/*
+ * print help text
+ */
+void
+print_app_usage(void)
+{
+
+	printf("Usage: %s --curveseckey <curve25519 secret file> --port <port> [--device interface]\n", APP_NAME);
+	printf("\n");
+	printf("Options:\n");
+	printf("    interface    Listen on <interface> for packets.\n");
+	printf("\n");
+
+return;
+}
+
+/*
+ * print data in rows of 16 bytes: offset   hex   ascii
+ *
+ * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
+ */
+void
+print_hex_ascii_line(const u_char *payload, int len, int offset)
+{
+
+	int i;
+	int gap;
+	const u_char *ch;
+
+	/* offset */
+	printf("%05d   ", offset);
+	
+	/* hex */
+	ch = payload;
+	for(i = 0; i < len; i++) {
+		printf("%02x ", *ch);
+		ch++;
+		/* print extra space after 8th byte for visual aid */
+		if (i == 7)
+			printf(" ");
+	}
+	/* print space to handle line less than 8 bytes */
+	if (len < 8)
+		printf(" ");
+	
+	/* fill hex gap with spaces if not full line */
+	if (len < 16) {
+		gap = 16 - len;
+		for (i = 0; i < gap; i++) {
+			printf("   ");
+		}
+	}
+	printf("   ");
+	
+	/* ascii (if printable) */
+	ch = payload;
+	for(i = 0; i < len; i++) {
+		if (isprint(*ch))
+			printf("%c", *ch);
+		else
+			printf(".");
+		ch++;
+	}
+
+	printf("\n");
+
+return;
+}
