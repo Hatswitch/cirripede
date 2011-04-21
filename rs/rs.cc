@@ -218,6 +218,9 @@
 #include <boost/shared_ptr.hpp>
 #include <string>
 #include <iostream>
+#include "ThreadSafeQueue.hpp"
+#include <boost/make_shared.hpp>
+#include <map>
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -229,9 +232,11 @@ static const char rcsid[] =
 using std::string;
 using std::cout;
 using std::endl;
+using std::map;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
+using boost::make_shared;
 
 // we only need upto the tcp sequence number
 #define SNAP_LEN (SIZE_ETHERNET + 60 + 2)
@@ -292,6 +297,8 @@ struct sniff_tcp {
         u_short th_sum;                 /* checksum */
         u_short th_urp;                 /* urgent pointer */
 };
+
+#define log cout << __FILE__ << ":" << __LINE__ <<
 
 #define safe_free(ptr)                          \
   do {                                          \
@@ -357,6 +364,32 @@ struct sniff_tcp {
   while (0)
 
 #define CURVE25519_KEYSIZE (32)
+
+
+class SynPacket_t {
+public:
+    SynPacket_t(const struct in_addr& ip_src, const u_char *tcp_seq)
+        : _ip_src(ip_src)
+    {
+        memcpy(_tcp_seq, tcp_seq, sizeof _tcp_seq);
+    }
+
+    const struct in_addr _ip_src;
+    u_char _tcp_seq[4];
+};
+
+class ClientState_t {
+public:
+    ClientState_t(const struct in_addr& ip)
+        : _ip(ip), _pktcount(0) {}
+
+    const struct in_addr _ip;
+    u_char curvepubkey[CURVE25519_KEYSIZE];
+    u_short _pktcount;
+};
+
+ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
+map<struct in_addr, ClientState_t> g_clients;
 
 int
 getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
@@ -431,17 +464,17 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
 
-	static int count = 0;                   /* packet counter */
+//	static int count = 0;                   /* packet counter */
 	
 	/* declare pointers to packet headers */
 	const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
 	const struct sniff_ip *ip;              /* The IP header */
 	const struct sniff_tcp *tcp;            /* The TCP header */
-
+    shared_ptr<SynPacket_t> synpkt;
 	int size_ip;
 	int size_tcp;
 	
-	printf("\nPacket number %d:\n", count);
+	// printf("\nPacket number %d:\n", count);
 	
 	/* define ethernet header */
 	ethernet = (struct sniff_ethernet*)(packet);
@@ -454,28 +487,30 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 		return;
 	}
 
-	/* print source and destination IP addresses */
-	printf("       From: %s\n", inet_ntoa(ip->ip_src));
-	printf("         To: %s\n", inet_ntoa(ip->ip_dst));
-	
-	/* determine protocol */	
-	switch(ip->ip_p) {
-		case IPPROTO_TCP:
-			printf("   Protocol: TCP\n");
-			break;
-		case IPPROTO_UDP:
-			printf("   Protocol: UDP\n");
-			return;
-		case IPPROTO_ICMP:
-			printf("   Protocol: ICMP\n");
-			return;
-		case IPPROTO_IP:
-			printf("   Protocol: IP\n");
-			return;
-		default:
-			printf("   Protocol: unknown\n");
-			return;
-	}
+	// /* print source and destination IP addresses */
+	// printf("       From: %s\n", inet_ntoa(ip->ip_src));
+	// printf("         To: %s\n", inet_ntoa(ip->ip_dst));
+
+    bail_require_msg(ip->ip_p == IPPROTO_TCP, "getting non-TCP packets");
+
+	// /* determine protocol */	
+	// switch(ip->ip_p) {
+	// 	case IPPROTO_TCP:
+	// 		printf("   Protocol: TCP\n");
+	// 		break;
+	// 	case IPPROTO_UDP:
+	// 		printf("   Protocol: UDP\n");
+	// 		return;
+	// 	case IPPROTO_ICMP:
+	// 		printf("   Protocol: ICMP\n");
+	// 		return;
+	// 	case IPPROTO_IP:
+	// 		printf("   Protocol: IP\n");
+	// 		return;
+	// 	default:
+	// 		printf("   Error: getting non-TCP packets\n");
+	// 		return;
+	// }
 	
 	/*
 	 *  OK, this packet is TCP.
@@ -488,7 +523,13 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 		printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
 		return;
 	}
-	
+
+    bail_require_msg(tcp->th_flags & TH_SYN, "getting non-SYN packets");
+
+    synpkt = make_shared<SynPacket_t>(ip->ip_src, (u_char*)&(tcp->th_seq));
+    g_synpackets.put(synpkt);
+
+#if 0
 	printf("   Src port: %d\n", ntohs(tcp->th_sport));
 	printf("   Dst port: %d\n", ntohs(tcp->th_dport));
 	printf("   seq num:  %d\n", ntohs(tcp->th_seq));
@@ -515,26 +556,25 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
       count = 0;
     }
 
-    
-#if 0
-	/* define/compute tcp payload (segment) offset */
-	payload = (u_char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
-	
-
-	/* compute tcp payload (segment) size */
-	size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
-	
-	/*
-	 * Print payload data; it might be binary, so don't just
-	 * treat it as a string.
-	 */
-	if (size_payload > 0) {
-		printf("   Payload (%d bytes):\n", size_payload);
-		print_payload(payload, size_payload);
-	}
 #endif
 
 bail:
+    return;
+}
+
+static void
+handleSynPackets()
+{
+    while (true) {
+        shared_ptr<SynPacket_t> synpkt = g_synpackets.get();
+        if (synpkt == NULL) {
+            continue;
+        }
+        log ": got a syn packet" <<endl;
+        // put it in the appropriate table entry
+        struct in_addr ip = synpkt->_ip_src;
+        
+    }
     return;
 }
 
@@ -554,6 +594,8 @@ int main(int argc, char **argv)
     int long_index;
     u_short port = 0;
     const char *seckeypath = NULL;
+
+    boost::thread synpkthandler = boost::thread(handleSynPackets);
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
@@ -656,7 +698,7 @@ int main(int argc, char **argv)
                 filter_exp.c_str(), pcap_geterr(handle));
 		exit(EXIT_FAILURE);
 	}
-
+    
 	/* now we can set our callback function */
 //	pcap_loop(handle, num_packets, got_packet, myseckey);
 	pcap_loop(handle, 0, got_packet, myseckey);
