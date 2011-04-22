@@ -396,14 +396,39 @@ public:
 
 static ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
+static int g_proxyctlsocket = -1;
+static struct sockaddr_in g_proxyaddr;
 
+/*
+ * get the various cryptographic stuff required for communicating with
+ * the client.
+ *
+ * the aes key used for signalling messages is derived
+ * kdf(sharedcurvekey + '1'), where '+' is concatenation.
+ *
+ * "rsciphertext" will be filled with the first 4 bytes of the cipher
+ * text of the clear text "register" encrypted with the aes key.
+ *
+ * "proxysynciphertext" and "proxyackciphertext": as above, but the
+ * clear texts are "syn" and "ack"; these are used for signalling
+ * between client and proxy.
+ *
+ * "proxystreamcipher" is the stream cipher that will be used to
+ * encrypt communication between client and
+ * proxy. "proxystreamcipherkey" and "proxystreamcipheriv" will be
+ * filled with the key and iv that should be used to initialize that
+ * cipher.
+*/
 int
-getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
+getclientcrypto(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
               /* used for registering */
               u_char rsciphertext[4],
               /* used to signal to proxy */
               u_char proxysynciphertext[4],
-              u_char proxyackciphertext[4]
+                u_char proxyackciphertext[4],
+                const EVP_CIPHER *proxystreamcipher,
+                u_char proxystreamcipherkey[EVP_MAX_KEY_LENGTH],
+                u_char proxystreamcipheriv[EVP_MAX_IV_LENGTH]
     )
 {
   int err = 0;
@@ -416,26 +441,27 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   /// generate key and iv for cipher
   u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
   u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
+  const EVP_CIPHER *signallingcipher = EVP_aes_128_cbc();
 
   // data to derive cipher key/iv
   u_char kdf_data[CURVE25519_KEYSIZE + 1] = {0};
+
+  bail_null(proxystreamcipher);
+
   // use the shared curve25519 key
   memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
-
-
   // the last byte is "1" to derive the aes key
   kdf_data[(sizeof kdf_data) - 1] = '1';
 
-  const EVP_CIPHER *cipher = EVP_aes_128_cbc();
-  int keylen = EVP_BytesToKey(
-    cipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
-    cipherkey, cipheriv);
-  bail_require(keylen == cipher->key_len);
+  retval = EVP_BytesToKey(
+      signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+      cipherkey, cipheriv);
+  bail_require(retval == signallingcipher->key_len);
 
   benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
 
-  BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
+  BIO_set_cipher(benc, signallingcipher, cipherkey, cipheriv, 1);
 
   ciphertextbio = BIO_new(BIO_s_mem());
   bail_null(ciphertextbio);
@@ -470,7 +496,17 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
                     proxyackciphertext, sizeof proxyackciphertext);
   bail_require(retval == sizeof proxyackciphertext);
 
-  
+  /////// now get the key and iv for the stream cipher used for
+  /////// communication between client and proxy
+
+  memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
+  // the last byte is "2"
+  kdf_data[(sizeof kdf_data) - 1] = '2';
+
+  retval = EVP_BytesToKey(
+      proxystreamcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+      proxystreamcipherkey, proxystreamcipheriv);
+  bail_require(retval == proxystreamcipher->key_len);
 
 bail:
   openssl_safe_free(BIO, benc);
@@ -584,8 +620,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
       u_char rsciphertext[4] = {0};
       u_char proxysynciphertext[4] = {0};
       u_char proxyackciphertext[4] = {0};
-      bail_error(getciphertext(sharedkey, rsciphertext,
-                               proxysynciphertext, proxyackciphertext));
+      bail_error(getclientcrypto(sharedkey, rsciphertext,
+                                 proxysynciphertext, proxyackciphertext));
       if (0 == memcmp(rsciphertext, &(tcp->th_seq), 4)) {
         printf("\n   Uniquifier matched!\n");
       }
@@ -596,6 +632,41 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     }
 
 #endif
+
+bail:
+    return;
+}
+
+static void
+notifyProxy(const u_long& src_ip,
+            const u_char *proxysynciphertext,
+            const u_char *proxyackciphertext,
+            const u_char *proxystreamcipherkey,
+            const int& proxystreamcipherkeylen,
+            const u_char *proxystreamcipheriv,
+            const int& proxystreamcipherivlen)
+{
+    int msglen;
+    u_long ip = htonl(src_ip);
+
+    bail_require(g_proxyctlsocket > -1);
+
+    /* 4 each for src ip, syn and ack ciphertext */
+    static u_char msg[12 + EVP_MAX_KEY_LENGTH + EVP_MAX_IV_LENGTH];
+
+    memcpy(msg + 0, &ip, 4);
+    memcpy(msg + 4, proxysynciphertext, 4);
+    memcpy(msg + 8, proxyackciphertext, 4);
+    memcpy(msg + 12,
+           proxystreamcipherkey, proxystreamcipherkeylen);
+    memcpy(msg + 12 + proxystreamcipherkeylen,
+           proxystreamcipheriv, proxystreamcipherivlen);
+
+    /* best effort, no guarantee */
+    msglen = 12 + proxystreamcipherkeylen + proxystreamcipherivlen;
+    bail_require(
+        msglen == sendto(g_proxyctlsocket, msg, msglen, MSG_DONTWAIT,
+                         (struct sockaddr*)&g_proxyaddr, sizeof g_proxyaddr));
 
 bail:
     return;
@@ -639,15 +710,27 @@ handleSynPackets()
             u_char rsciphertext[4] = {0};
             u_char proxysynciphertext[4] = {0};
             u_char proxyackciphertext[4] = {0};
+            u_char proxystreamcipherkey[EVP_MAX_KEY_LENGTH] = {0};
+            u_char proxystreamcipheriv[EVP_MAX_IV_LENGTH] = {0};
+            static const EVP_CIPHER* proxystreamcipher = EVP_rc4();
+
             // have received the final pkt --> check uniquifier
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
-            bail_error(getciphertext(sharedkey, rsciphertext,
-                                     proxysynciphertext, proxyackciphertext));
+            bail_error(getclientcrypto(sharedkey,
+                                       rsciphertext,
+                                       proxysynciphertext, proxyackciphertext,
+                                       proxystreamcipher,
+                                       proxystreamcipherkey,
+                                       proxystreamcipheriv));
             if (0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
                 log << "\n   Uniquifier matched! client is now registered" << endl;
                 cs->_state = CS_ST_REGISTERED;
                 // reset pkt count
                 cs->_pktcount = 0;
+
+                notifyProxy(ip, proxysynciphertext, proxyackciphertext,
+                            proxystreamcipherkey, proxystreamcipher->key_len,
+                            proxystreamcipheriv, proxystreamcipher->iv_len);
             }
             else {
                 log << "\n   Uniquifier DO NOT match" << endl;
@@ -678,13 +761,16 @@ int main(int argc, char **argv)
     int long_index;
     u_short port = 0;
     const char *seckeypath = NULL;
-
-    boost::thread synpkthandler = boost::thread(handleSynPackets);
+    const char *proxyip = NULL;
+    u_short proxyctlport = 0;
+    boost::thread synpkthandler;
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
         {"device", required_argument, 0, 1001},
         {"curveseckey", required_argument, 0, 1002},
+        {"proxyip", required_argument, 0, 1003},
+        {"proxyctlport", required_argument, 0, 1004},
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -713,6 +799,14 @@ int main(int argc, char **argv)
             seckeypath = optarg;
             break;
 
+        case 1003:
+            proxyip = optarg;
+            break;
+
+        case 1004:
+            proxyctlport = strtod(optarg, NULL);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
@@ -720,7 +814,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (port == 0 || seckeypath == NULL) {
+    if (!port || !seckeypath || !proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
@@ -731,6 +825,15 @@ int main(int argc, char **argv)
     bail_null(curvesecretfilebio);
 
     bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+
+    /* create control socket to the proxy */
+    g_proxyctlsocket = socket(PF_INET, SOCK_DGRAM, 0);
+    bail_require(g_proxyctlsocket != -1);
+
+    bzero(&g_proxyaddr,sizeof(g_proxyaddr));
+    g_proxyaddr.sin_family = AF_INET;
+    g_proxyaddr.sin_addr.s_addr=inet_addr(proxyip);
+    g_proxyaddr.sin_port=htons(proxyctlport);
 
 	if (dev == NULL) {
 		/* find a capture device if not specified on command-line */
@@ -781,7 +884,9 @@ int main(int argc, char **argv)
                 filter_exp.c_str(), pcap_geterr(handle));
 		exit(EXIT_FAILURE);
 	}
-    
+
+    synpkthandler = boost::thread(handleSynPackets);
+
 	/* now we can set our callback function */
 //	pcap_loop(handle, num_packets, got_packet, myseckey);
 	pcap_loop(handle, 0, got_packet, NULL);
@@ -864,10 +969,9 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s --curveseckey <curve25519 secret file> --port <port> [--device interface]\n", APP_NAME);
-	printf("\n");
-	printf("Options:\n");
-	printf("    interface    Listen on <interface> for packets.\n");
+	printf("Usage: %s --curveseckey <curve25519 secret file> --port <port>\n"
+           "          --proxyip ... --proxyctlport ... \n"
+           "          [--device interface]\n", APP_NAME);
 	printf("\n");
 
 return;
