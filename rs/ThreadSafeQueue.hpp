@@ -12,6 +12,8 @@ class ThreadSafeQueue
 public:
     ~ThreadSafeQueue();
     void put(T& item);
+
+    /* this will block if the queue is empty */
     T get();
 
 private:
