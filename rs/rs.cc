@@ -221,6 +221,7 @@
 #include "ThreadSafeQueue.hpp"
 #include <boost/make_shared.hpp>
 #include <map>
+#include "common.hpp"
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -298,7 +299,7 @@ struct sniff_tcp {
         u_short th_urp;                 /* urgent pointer */
 };
 
-#define log cout << __FILE__ << ":" << __LINE__ <<
+#define log cout << __FILE__ << ":" << __LINE__ << ": "
 
 #define safe_free(ptr)                          \
   do {                                          \
@@ -368,36 +369,48 @@ struct sniff_tcp {
 
 class SynPacket_t {
 public:
-    SynPacket_t(const struct in_addr& ip_src, const u_char *tcp_seq)
+    SynPacket_t(const u_long& ip_src, const u_char *tcp_seq)
         : _ip_src(ip_src)
     {
         memcpy(_tcp_seq, tcp_seq, sizeof _tcp_seq);
     }
 
-    const struct in_addr _ip_src;
+    const u_long _ip_src;
     u_char _tcp_seq[4];
 };
 
+typedef enum  {
+    CS_ST_PENDING,
+    CS_ST_REGISTERED,
+} client_state_t;
+
 class ClientState_t {
 public:
-    ClientState_t(const struct in_addr& ip)
-        : _ip(ip), _pktcount(0) {}
+    ClientState_t()
+        : _state(CS_ST_PENDING), _pktcount(0) {}
 
-    const struct in_addr _ip;
-    u_char curvepubkey[CURVE25519_KEYSIZE];
+    u_char _curvepubkey[CURVE25519_KEYSIZE];
+    client_state_t _state;
     u_short _pktcount;
 };
 
-ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
-map<struct in_addr, ClientState_t> g_clients;
+static ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
+static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 
 int
 getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
-              u_char ciphertext[4])
+              /* used for registering */
+              u_char rsciphertext[4],
+              /* used to signal to proxy */
+              u_char proxysynciphertext[4],
+              u_char proxyackciphertext[4]
+    )
 {
   int err = 0;
   int retval = 0;
-  static const char str[] = "hello-rs";
+  static const char str[] = "register";
+  static const char syn[] = "syn";
+  static const char ack[] = "ack";
   BIO *ciphertextbio = NULL;
   BIO *benc = NULL;
   /// generate key and iv for cipher
@@ -408,7 +421,9 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   u_char kdf_data[CURVE25519_KEYSIZE + 1] = {0};
   // use the shared curve25519 key
   memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
-  // and the last byte is for now hardcoded "1"
+
+
+  // the last byte is "1" to derive the aes key
   kdf_data[(sizeof kdf_data) - 1] = '1';
 
   const EVP_CIPHER *cipher = EVP_aes_128_cbc();
@@ -427,14 +442,35 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
 
   bail_require(BIO_push(benc, ciphertextbio) == benc);
 
-  // encrypt "hello"
   retval = BIO_write(benc, str, strlen(str));
   bail_require(retval == strlen(str));
+  bail_require(1 == BIO_flush(benc)); // need to flush
+
+  // read out the first 4 bytes of the regciphertext
+  retval = BIO_read(ciphertextbio, rsciphertext, sizeof rsciphertext);
+  bail_require(retval == sizeof rsciphertext);
+
+  //////////////////////////
+  // now get the cipher text for signalling the proxy and the expected
+  // response
+
+  retval = BIO_write(benc, syn, strlen(syn));
+  bail_require(retval == strlen(syn));
   bail_require(1 == BIO_flush(benc));
 
-  // read out the first 4 bytes of the ciphertext
-  retval = BIO_read(ciphertextbio, ciphertext, sizeof ciphertext);
-  bail_require(retval == sizeof ciphertext);
+  retval = BIO_read(ciphertextbio,
+                    proxysynciphertext, sizeof proxysynciphertext);
+  bail_require(retval == sizeof proxysynciphertext);
+
+  retval = BIO_write(benc, ack, strlen(ack));
+  bail_require(retval == strlen(ack));
+  bail_require(1 == BIO_flush(benc));
+
+  retval = BIO_read(ciphertextbio,
+                    proxyackciphertext, sizeof proxyackciphertext);
+  bail_require(retval == sizeof proxyackciphertext);
+
+  
 
 bail:
   openssl_safe_free(BIO, benc);
@@ -526,7 +562,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
     bail_require_msg(tcp->th_flags & TH_SYN, "getting non-SYN packets");
 
-    synpkt = make_shared<SynPacket_t>(ip->ip_src, (u_char*)&(tcp->th_seq));
+    synpkt = make_shared<SynPacket_t>(ip->ip_src.s_addr, (u_char*)&(tcp->th_seq));
     g_synpackets.put(synpkt);
 
 #if 0
@@ -545,9 +581,12 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
       /* we should have the client pubkey and the uniquifier now */
       const u_char *myseckey = args;
       curve25519(sharedkey, myseckey, clientpubkey);
-      u_char ciphertext[4] = {0};
-      bail_error(getciphertext(sharedkey, ciphertext));
-      if (0 == memcmp(ciphertext, &(tcp->th_seq), 4)) {
+      u_char rsciphertext[4] = {0};
+      u_char proxysynciphertext[4] = {0};
+      u_char proxyackciphertext[4] = {0};
+      bail_error(getciphertext(sharedkey, rsciphertext,
+                               proxysynciphertext, proxyackciphertext));
+      if (0 == memcmp(rsciphertext, &(tcp->th_seq), 4)) {
         printf("\n   Uniquifier matched!\n");
       }
       else {
@@ -565,15 +604,60 @@ bail:
 static void
 handleSynPackets()
 {
+    static map<u_long, shared_ptr<ClientState_t> > clients;
+
     while (true) {
         shared_ptr<SynPacket_t> synpkt = g_synpackets.get();
         if (synpkt == NULL) {
             continue;
         }
-        log ": got a syn packet" <<endl;
         // put it in the appropriate table entry
-        struct in_addr ip = synpkt->_ip_src;
-        
+        const u_long ip = synpkt->_ip_src;
+        shared_ptr<ClientState_t> cs;
+        if (Common::inMap(clients, ip)) {
+            cs = clients[ip];
+        }
+        else {
+            cs = make_shared<ClientState_t>();
+            // put it into the map
+            clients[ip] = cs;
+            struct in_addr tmp;
+            tmp.s_addr = ip;
+            log << " new pending client ip: " << inet_ntoa(tmp) << endl;
+        }
+
+        ///// at this point, cs is a valid entry in the map /////
+
+        // increment first
+        cs->_pktcount += 1;
+        if (cs->_pktcount < 9) {
+            // need more pkts
+            memcpy(cs->_curvepubkey + ((cs->_pktcount - 1) * 4), synpkt->_tcp_seq, 4);
+        }
+        else {
+            u_char sharedkey[CURVE25519_KEYSIZE] = {0};
+            u_char rsciphertext[4] = {0};
+            u_char proxysynciphertext[4] = {0};
+            u_char proxyackciphertext[4] = {0};
+            // have received the final pkt --> check uniquifier
+            curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
+            bail_error(getciphertext(sharedkey, rsciphertext,
+                                     proxysynciphertext, proxyackciphertext));
+            if (0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
+                log << "\n   Uniquifier matched! client is now registered" << endl;
+                cs->_state = CS_ST_REGISTERED;
+                // reset pkt count
+                cs->_pktcount = 0;
+            }
+            else {
+                log << "\n   Uniquifier DO NOT match" << endl;
+                // remove cs from map
+                clients.erase(ip);
+            }
+        }
+        log << "map size: " << clients.size() << endl;
+bail:
+        continue;
     }
     return;
 }
@@ -643,11 +727,10 @@ int main(int argc, char **argv)
 
     filter_exp += lexical_cast<string>(port);
 
-    u_char myseckey[CURVE25519_KEYSIZE] = {0};
     BIO *curvesecretfilebio = BIO_new_file(seckeypath, "rb");
     bail_null(curvesecretfilebio);
 
-    bail_require_msg(sizeof myseckey == BIO_read(curvesecretfilebio, myseckey, sizeof myseckey), "error reading secret curve key");
+    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
 
 	if (dev == NULL) {
 		/* find a capture device if not specified on command-line */
@@ -701,7 +784,7 @@ int main(int argc, char **argv)
     
 	/* now we can set our callback function */
 //	pcap_loop(handle, num_packets, got_packet, myseckey);
-	pcap_loop(handle, 0, got_packet, myseckey);
+	pcap_loop(handle, 0, got_packet, NULL);
 
 	/* cleanup */
 	pcap_freecode(&fp);
