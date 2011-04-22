@@ -141,9 +141,20 @@ void computepublickey(unsigned char pub[CURVE25519_KEYSIZE], const unsigned char
 
 int
 getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
-              u_char ciphertext[4])
+              /* used for registering */
+              u_char rsciphertext[4],
+              /* used to signal to proxy */
+              u_char proxysynciphertext[4],
+              u_char proxyackciphertext[4]
+    )
 {
   int err = 0;
+  int retval = 0;
+  static const char str[] = "register";
+  static const char syn[] = "syn";
+  static const char ack[] = "ack";
+  BIO *ciphertextbio = NULL;
+  BIO *benc = NULL;
   /// generate key and iv for cipher
   u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
   u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
@@ -152,7 +163,9 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   u_char kdf_data[CURVE25519_KEYSIZE + 1] = {0};
   // use the shared curve25519 key
   memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
-  // and the last byte is for now hardcoded "1"
+
+
+  // the last byte is "1" to derive the aes key
   kdf_data[(sizeof kdf_data) - 1] = '1';
 
   const EVP_CIPHER *cipher = EVP_aes_128_cbc();
@@ -161,25 +174,44 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
     cipherkey, cipheriv);
   bail_require(keylen == cipher->key_len);
 
-  BIO *benc = BIO_new(BIO_f_cipher());
+  benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
 
   BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
 
-  BIO *ciphertextbio = BIO_new(BIO_s_mem());
+  ciphertextbio = BIO_new(BIO_s_mem());
   bail_null(ciphertextbio);
 
   bail_require(BIO_push(benc, ciphertextbio) == benc);
 
-  // encrypt "hello"
-  const char str[] = "hello-rs";
-  int retval = BIO_write(benc, str, strlen(str));
+  retval = BIO_write(benc, str, strlen(str));
   bail_require(retval == strlen(str));
+  bail_require(1 == BIO_flush(benc)); // need to flush
+
+  // read out the first 4 bytes of the regciphertext
+  retval = BIO_read(ciphertextbio, rsciphertext, sizeof rsciphertext);
+  bail_require(retval == sizeof rsciphertext);
+
+  //////////////////////////
+  // now get the cipher text for signalling the proxy and the expected
+  // response
+
+  retval = BIO_write(benc, syn, strlen(syn));
+  bail_require(retval == strlen(syn));
   bail_require(1 == BIO_flush(benc));
 
-  // read out the first 4 bytes of the ciphertext
-  retval = BIO_read(ciphertextbio, ciphertext, sizeof ciphertext);
-  bail_require(retval == sizeof ciphertext);
+  retval = BIO_read(ciphertextbio,
+                    proxysynciphertext, sizeof proxysynciphertext);
+  bail_require(retval == sizeof proxysynciphertext);
+
+  retval = BIO_write(benc, ack, strlen(ack));
+  bail_require(retval == strlen(ack));
+  bail_require(1 == BIO_flush(benc));
+
+  retval = BIO_read(ciphertextbio,
+                    proxyackciphertext, sizeof proxyackciphertext);
+  bail_require(retval == sizeof proxyackciphertext);
+
 
 bail:
   openssl_safe_free(BIO, benc);
@@ -223,8 +255,11 @@ int main(int argc, char *argv[])
   u_char sharedkey[CURVE25519_KEYSIZE] = {0};
   curve25519(sharedkey, myseckey, rspubkey);
 
-  u_char ciphertext[4] = {0};
-  bail_error(getciphertext(sharedkey, ciphertext));
+  u_char rsciphertext[4] = {0};
+  u_char proxysynciphertext[4] = {0};
+  u_char proxyackciphertext[4] = {0};
+  bail_error(getciphertext(sharedkey, rsciphertext,
+                           proxysynciphertext, proxyackciphertext));
 
 
 
@@ -288,7 +323,7 @@ int main(int argc, char *argv[])
     }
     else {
       // use the ciphertext
-      memcpy(&tcp->tcph_seqnum, ciphertext, 4);
+      memcpy(&tcp->tcph_seqnum, rsciphertext, 4);
     }
 
     assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_srcport),
