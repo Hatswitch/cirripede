@@ -207,9 +207,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/rand.h>
 #include <assert.h>
 #include "openssl/ssl.h"
 #include "openssl/err.h"
@@ -399,114 +396,40 @@ static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
 
-/*
- * get the various cryptographic stuff required for communicating with
- * the client.
- *
- * the aes key used for signalling messages is derived
- * kdf(sharedcurvekey + '1'), where '+' is concatenation.
- *
- * "rsciphertext" will be filled with the first 4 bytes of the cipher
- * text of the clear text "register" encrypted with the aes key.
- *
- * "proxysynciphertext" and "proxyackciphertext": as above, but the
- * clear texts are "syn" and "ack"; these are used for signalling
- * between client and proxy.
- *
- * "proxystreamcipher" is the stream cipher that will be used to
- * encrypt communication between client and
- * proxy. "proxystreamcipherkey" and "proxystreamcipheriv" will be
- * filled with the key and iv that should be used to initialize that
- * cipher.
-*/
 int
-getclientcrypto(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
-              /* used for registering */
-              u_char rsciphertext[4],
-              /* used to signal to proxy */
-              u_char proxysynciphertext[4],
-                u_char proxyackciphertext[4],
-                const EVP_CIPHER *proxystreamcipher,
-                u_char proxystreamcipherkey[EVP_MAX_KEY_LENGTH],
-                u_char proxystreamcipheriv[EVP_MAX_IV_LENGTH]
+encrypt(const EVP_CIPHER *cipher,
+        const u_char cipherkey[EVP_MAX_KEY_LENGTH],
+        const u_char cipheriv[EVP_MAX_IV_LENGTH],
+        const u_char *cleartext,
+        const int cleartextlen,
+        u_char *ciphertext,
+        const int ciphertextlen
     )
 {
   int err = 0;
   int retval = 0;
-  static const char str[] = "register";
-  static const char syn[] = "syn";
-  static const char ack[] = "ack";
   BIO *ciphertextbio = NULL;
   BIO *benc = NULL;
-  /// generate key and iv for cipher
-  u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
-  u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
-  const EVP_CIPHER *signallingcipher = EVP_aes_128_cbc();
 
-  // data to derive cipher key/iv
-  u_char kdf_data[CURVE25519_KEYSIZE + 1] = {0};
-
-  bail_null(proxystreamcipher);
-
-  // use the shared curve25519 key
-  memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
-  // the last byte is "1" to derive the aes key
-  kdf_data[(sizeof kdf_data) - 1] = '1';
-
-  retval = EVP_BytesToKey(
-      signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
-      cipherkey, cipheriv);
-  bail_require(retval == signallingcipher->key_len);
+  bail_require(ciphertextlen <= cleartextlen);
 
   benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
 
-  BIO_set_cipher(benc, signallingcipher, cipherkey, cipheriv, 1);
+  BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
 
   ciphertextbio = BIO_new(BIO_s_mem());
   bail_null(ciphertextbio);
 
   bail_require(BIO_push(benc, ciphertextbio) == benc);
 
-  retval = BIO_write(benc, str, strlen(str));
-  bail_require(retval == strlen(str));
+  retval = BIO_write(benc, cleartext, cleartextlen);
+  bail_require(retval == cleartextlen);
   bail_require(1 == BIO_flush(benc)); // need to flush
 
-  // read out the first 4 bytes of the regciphertext
-  retval = BIO_read(ciphertextbio, rsciphertext, sizeof rsciphertext);
-  bail_require(retval == sizeof rsciphertext);
-
-  //////////////////////////
-  // now get the cipher text for signalling the proxy and the expected
-  // response
-
-  retval = BIO_write(benc, syn, strlen(syn));
-  bail_require(retval == strlen(syn));
-  bail_require(1 == BIO_flush(benc));
-
-  retval = BIO_read(ciphertextbio,
-                    proxysynciphertext, sizeof proxysynciphertext);
-  bail_require(retval == sizeof proxysynciphertext);
-
-  retval = BIO_write(benc, ack, strlen(ack));
-  bail_require(retval == strlen(ack));
-  bail_require(1 == BIO_flush(benc));
-
-  retval = BIO_read(ciphertextbio,
-                    proxyackciphertext, sizeof proxyackciphertext);
-  bail_require(retval == sizeof proxyackciphertext);
-
-  /////// now get the key and iv for the stream cipher used for
-  /////// communication between client and proxy
-
-  memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
-  // the last byte is "2"
-  kdf_data[(sizeof kdf_data) - 1] = '2';
-
-  retval = EVP_BytesToKey(
-      proxystreamcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
-      proxystreamcipherkey, proxystreamcipheriv);
-  bail_require(retval == proxystreamcipher->key_len);
+  // read out the regciphertext
+  retval = BIO_read(ciphertextbio, ciphertext, ciphertextlen);
+  bail_require(retval == ciphertextlen);
 
 bail:
   openssl_safe_free(BIO, benc);
@@ -601,73 +524,32 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     synpkt = make_shared<SynPacket_t>(ip->ip_src.s_addr, (u_char*)&(tcp->th_seq));
     g_synpackets.put(synpkt);
 
-#if 0
-	printf("   Src port: %d\n", ntohs(tcp->th_sport));
-	printf("   Dst port: %d\n", ntohs(tcp->th_dport));
-	printf("   seq num:  %d\n", ntohs(tcp->th_seq));
-
-    static u_char clientpubkey[CURVE25519_KEYSIZE] = {0};
-    static u_char sharedkey[CURVE25519_KEYSIZE] = {0};
-    static const int numrequiredpackets = (CURVE25519_KEYSIZE + 4) / 4;
-    if (count < (numrequiredpackets - 1)) {
-      memcpy(clientpubkey + (count * 4), &(tcp->th_seq), 4);
-      count++;
-    }
-    else {
-      /* we should have the client pubkey and the uniquifier now */
-      const u_char *myseckey = args;
-      curve25519(sharedkey, myseckey, clientpubkey);
-      u_char rsciphertext[4] = {0};
-      u_char proxysynciphertext[4] = {0};
-      u_char proxyackciphertext[4] = {0};
-      bail_error(getclientcrypto(sharedkey, rsciphertext,
-                                 proxysynciphertext, proxyackciphertext));
-      if (0 == memcmp(rsciphertext, &(tcp->th_seq), 4)) {
-        printf("\n   Uniquifier matched!\n");
-      }
-      else {
-        printf("\n   Uniquifier DO NOT match!\n");
-      }
-      count = 0;
-    }
-
-#endif
-
 bail:
     return;
 }
 
 static void
-notifyProxy(const u_long& src_ip,
-            const u_char *proxysynciphertext,
-            const u_char *proxyackciphertext,
-            const u_char *proxystreamcipherkey,
-            const int& proxystreamcipherkeylen,
-            const u_char *proxystreamcipheriv,
-            const int& proxystreamcipherivlen)
+notifyProxy(const uint32_t& src_ip,
+            const u_char *kdf_data,
+            const int& kdf_data_len)
 {
-    int msglen;
-    u_long ip = htonl(src_ip);
+    static const int max_kdf_data_len = 64; // arbitrary
+    int msglen = 4 + kdf_data_len;
+    uint32_t ip = htonl(src_ip);
 
     bail_require(g_proxyctlsocket > -1);
+    bail_require(kdf_data_len <= max_kdf_data_len);
 
-    /* 4 each for src ip, syn and ack ciphertext */
-    static u_char msg[12 + EVP_MAX_KEY_LENGTH + EVP_MAX_IV_LENGTH];
+    /* 4 for src ip */
+    static u_char msg[4 + max_kdf_data_len];
 
     memcpy(msg + 0, &ip, 4);
-    memcpy(msg + 4, proxysynciphertext, 4);
-    memcpy(msg + 8, proxyackciphertext, 4);
-    memcpy(msg + 12,
-           proxystreamcipherkey, proxystreamcipherkeylen);
-    memcpy(msg + 12 + proxystreamcipherkeylen,
-           proxystreamcipheriv, proxystreamcipherivlen);
+    memcpy(msg + 4, kdf_data, kdf_data_len);
 
     /* best effort, no guarantee */
-    msglen = 12 + proxystreamcipherkeylen + proxystreamcipherivlen;
     bail_require(
         msglen == sendto(g_proxyctlsocket, msg, msglen, MSG_DONTWAIT,
                          (struct sockaddr*)&g_proxyaddr, sizeof g_proxyaddr));
-
 bail:
     return;
 }
@@ -675,7 +557,7 @@ bail:
 static void
 handleSynPackets()
 {
-    static map<u_long, shared_ptr<ClientState_t> > clients;
+    static map<uint32_t, shared_ptr<ClientState_t> > clients;
 
     while (true) {
         shared_ptr<SynPacket_t> synpkt = g_synpackets.get();
@@ -683,7 +565,7 @@ handleSynPackets()
             continue;
         }
         // put it in the appropriate table entry
-        const u_long ip = synpkt->_ip_src;
+        const uint32_t ip = synpkt->_ip_src;
         shared_ptr<ClientState_t> cs;
         if (Common::inMap(clients, ip)) {
             cs = clients[ip];
@@ -707,30 +589,31 @@ handleSynPackets()
         }
         else {
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
-            u_char rsciphertext[4] = {0};
-            u_char proxysynciphertext[4] = {0};
-            u_char proxyackciphertext[4] = {0};
-            u_char proxystreamcipherkey[EVP_MAX_KEY_LENGTH] = {0};
-            u_char proxystreamcipheriv[EVP_MAX_IV_LENGTH] = {0};
-            static const EVP_CIPHER* proxystreamcipher = EVP_rc4();
-
-            // have received the final pkt --> check uniquifier
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
-            bail_error(getclientcrypto(sharedkey,
-                                       rsciphertext,
-                                       proxysynciphertext, proxyackciphertext,
-                                       proxystreamcipher,
-                                       proxystreamcipherkey,
-                                       proxystreamcipheriv));
+
+            u_char kdf_data[(sizeof sharedkey) + 1] = {'1'};
+            memcpy(kdf_data, sharedkey, sizeof sharedkey);
+
+            u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
+            u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
+            const EVP_CIPHER *signallingcipher = EVP_aes_128_cbc();
+
+            int retval = EVP_BytesToKey(
+                signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+                cipherkey, cipheriv);
+            bail_require(retval == signallingcipher->key_len);
+
+            u_char rsciphertext[4] = {0};
+            bail_error(encrypt(signallingcipher, cipherkey, cipheriv,
+                               (u_char*)"register", strlen("register"),
+                               rsciphertext, sizeof rsciphertext));
             if (0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
                 log << "\n   Uniquifier matched! client is now registered" << endl;
                 cs->_state = CS_ST_REGISTERED;
                 // reset pkt count
                 cs->_pktcount = 0;
 
-                notifyProxy(ip, proxysynciphertext, proxyackciphertext,
-                            proxystreamcipherkey, proxystreamcipher->key_len,
-                            proxystreamcipheriv, proxystreamcipher->iv_len);
+                notifyProxy(ip, sharedkey, sizeof sharedkey);
             }
             else {
                 log << "\n   Uniquifier DO NOT match" << endl;
