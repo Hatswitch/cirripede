@@ -591,8 +591,9 @@ handleSynPackets()
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
 
-            u_char kdf_data[(sizeof sharedkey) + 1] = {'1'};
+            u_char kdf_data[(sizeof sharedkey) + 1];
             memcpy(kdf_data, sharedkey, sizeof sharedkey);
+            kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
 
             u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
             u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
