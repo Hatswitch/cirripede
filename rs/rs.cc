@@ -455,6 +455,7 @@ static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
 bool g_verbose = false;
+bool g_dont_cmp_ciphertext = false;
 
 int
 encrypt(const EVP_CIPHER *cipher,
@@ -637,6 +638,7 @@ handleSynPackets()
             struct in_addr tmp;
             tmp.s_addr = ip;
             log << " new pending client ip: " << inet_ntoa(tmp) << endl;
+            log << "new map size: " << clients.size() << endl;
         }
 
         ///// at this point, cs is a valid entry in the map /////
@@ -671,8 +673,11 @@ handleSynPackets()
             bail_error(encrypt(signallingcipher, cipherkey, cipheriv,
                                (u_char*)"register", strlen("register"),
                                rsciphertext, sizeof rsciphertext));
-            if (0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
-                log << "\n   Uniquifier matched! client is now registered" << endl;
+            /* if g_dont_cmp_ciphertext is true, then we just accept
+             * no matter what.
+             */
+            if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
+                log << "\n   ciphertext matched (or not compared)! notifying proxy about client" << endl;
                 cs->_state = CS_ST_REGISTERED;
                 // reset pkt count
                 cs->_pktcount = 0;
@@ -680,12 +685,12 @@ handleSynPackets()
                 notifyProxy(ip, sharedkey, sizeof sharedkey);
             }
             else {
-                log << "\n   Uniquifier DO NOT match" << endl;
+                log << "\n   ciphertext does not match" << endl;
                 // remove cs from map
                 clients.erase(ip);
+                log << "   client removed from map -> new map size: " << clients.size() << endl;
             }
         }
-        log << "map size: " << clients.size() << endl;
 bail:
         continue;
     }
@@ -719,6 +724,7 @@ int main(int argc, char **argv)
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
+        {"dont-compare-ciphertext", no_argument, 0, 1006},
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -757,6 +763,10 @@ int main(int argc, char **argv)
 
         case 1005:
             g_verbose = true;
+            break;
+
+        case 1006:
+            g_dont_cmp_ciphertext = true;
             break;
 
         default:
@@ -827,6 +837,7 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
+    memset(&fp, 0, sizeof fp);
 	/* compile the filter expression */
 	if (pcap_compile(handle, &fp, filter_exp.c_str(), 0, net) == -1) {
 		fprintf(stderr, "Couldn't parse filter %s: %s\n",
