@@ -363,6 +363,65 @@ struct sniff_tcp {
 
 #define CURVE25519_KEYSIZE (32)
 
+/*
+ * print data in rows of 16 bytes: offset   hex   ascii
+ *
+ * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
+ */
+void
+print_hex_ascii_line(const char *header /* optional */,
+                     const unsigned char *payload, int len, int offset)
+{
+
+  int i;
+  int gap;
+  const unsigned char *ch;
+
+  if (header) {
+    printf("%s:\n", header);
+  }
+  /* offset */
+  printf("%05d   ", offset);
+
+  /* hex */
+  ch = payload;
+  for(i = 0; i < len; i++) {
+    printf("%02x", *ch);
+    ch++;
+    /* print extra space after 8th byte for visual aid */
+    if (((i + 1) % 4) == 0)
+      printf(" ");
+  }
+  /* print space to handle line less than 8 bytes */
+  if (len < 8)
+    printf(" ");
+
+  /* fill hex gap with spaces if not full line */
+  if (len < 16) {
+    gap = 16 - len;
+    for (i = 0; i < gap; i++) {
+      printf("   ");
+    }
+  }
+  printf("   ");
+
+  /* ascii (if printable) */
+  ch = payload;
+  for(i = 0; i < len; i++) {
+    if (isprint(*ch))
+      printf("%c", *ch);
+    else
+      printf(".");
+    ch++;
+    if (((i + 1) % 4) == 0)
+      printf(" ");
+  }
+
+  printf("\n");
+
+  return;
+}
+
 
 class SynPacket_t {
 public:
@@ -395,6 +454,7 @@ static ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
+bool g_verbose = false;
 
 int
 encrypt(const EVP_CIPHER *cipher,
@@ -591,6 +651,9 @@ handleSynPackets()
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
 
+            if (g_verbose) {
+                print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
+            }
             u_char kdf_data[(sizeof sharedkey) + 1];
             memcpy(kdf_data, sharedkey, sizeof sharedkey);
             kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
@@ -655,6 +718,7 @@ int main(int argc, char **argv)
         {"curveseckey", required_argument, 0, 1002},
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
+        {"verbose", no_argument, 0, 1005},
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -691,6 +755,10 @@ int main(int argc, char **argv)
             proxyctlport = strtod(optarg, NULL);
             break;
 
+        case 1005:
+            g_verbose = true;
+            break;
+
         default:
             print_app_usage();
             exit(-1);
@@ -709,6 +777,10 @@ int main(int argc, char **argv)
     bail_null(curvesecretfilebio);
 
     bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+
+    if (g_verbose) {
+        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
+    }
 
     /* create control socket to the proxy */
     g_proxyctlsocket = socket(PF_INET, SOCK_DGRAM, 0);
