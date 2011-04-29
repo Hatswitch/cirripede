@@ -456,6 +456,8 @@ static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
 bool g_verbose = false;
 bool g_dont_cmp_ciphertext = false;
+bool g_hardcode_sharedkey = false;
+static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 
 int
 encrypt(const EVP_CIPHER *cipher,
@@ -505,7 +507,8 @@ void
 print_payload(const u_char *payload, int len);
 
 void
-print_hex_ascii_line(const u_char *payload, int len, int offset);
+print_hex_ascii_line(const char *header /* optional */,
+                     const unsigned char *payload, int len, int offset);
 
 void
 print_app_banner(void);
@@ -654,10 +657,12 @@ handleSynPackets()
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
 
             if (g_verbose) {
-                print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
+                if (!g_hardcode_sharedkey) {
+                    print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
+                }
             }
             u_char kdf_data[(sizeof sharedkey) + 1];
-            memcpy(kdf_data, sharedkey, sizeof sharedkey);
+            memcpy(kdf_data, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
             kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
 
             u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
@@ -682,7 +687,7 @@ handleSynPackets()
                 // reset pkt count
                 cs->_pktcount = 0;
 
-                notifyProxy(ip, sharedkey, sizeof sharedkey);
+                notifyProxy(ip, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
             }
             else {
                 log << "\n   ciphertext does not match" << endl;
@@ -716,6 +721,7 @@ int main(int argc, char **argv)
     const char *proxyip = NULL;
     u_short proxyctlport = 0;
     boost::thread synpkthandler;
+    BIO *curvesecretfilebio = NULL;
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
@@ -725,6 +731,7 @@ int main(int argc, char **argv)
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
         {"dont-compare-ciphertext", no_argument, 0, 1006},
+        {"hardcode-sharedkey", required_argument, 0, 1007},
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -769,6 +776,12 @@ int main(int argc, char **argv)
             g_dont_cmp_ciphertext = true;
             break;
 
+        case 1007:
+            g_hardcode_sharedkey = true;
+            memset(g_hardcoded_sharedkey, optarg[0],
+                   sizeof g_hardcoded_sharedkey);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
@@ -776,20 +789,32 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!port || !seckeypath || !proxyip || !proxyctlport) {
+    if (seckeypath && g_hardcode_sharedkey) {
+        fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
+        exit(-1);
+    }
+    if (!port || !(seckeypath || g_hardcode_sharedkey) || !proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
 
     filter_exp += lexical_cast<string>(port);
 
-    BIO *curvesecretfilebio = BIO_new_file(seckeypath, "rb");
-    bail_null(curvesecretfilebio);
+    if (!g_hardcode_sharedkey) {
+        curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+        bail_null(curvesecretfilebio);
 
-    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+        bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+    }
 
     if (g_verbose) {
-        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
+        if (!g_hardcode_sharedkey) {
+            print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
+        }
+        else {
+            print_hex_ascii_line("hardcoded sharedkey", g_hardcoded_sharedkey,
+                                 sizeof g_hardcoded_sharedkey, 0);
+        }
     }
 
     /* create control socket to the proxy */
@@ -870,51 +895,6 @@ return 0;
 }
 
 /*
- * print packet payload data (avoid printing binary data)
- */
-void
-print_payload(const u_char *payload, int len)
-{
-
-	int len_rem = len;
-	int line_width = 16;			/* number of bytes per line */
-	int line_len;
-	int offset = 0;					/* zero-based offset counter */
-	const u_char *ch = payload;
-
-	if (len <= 0)
-		return;
-
-	/* data fits on one line */
-	if (len <= line_width) {
-		print_hex_ascii_line(ch, len, offset);
-		return;
-	}
-
-	/* data spans multiple lines */
-	for ( ;; ) {
-		/* compute current line length */
-		line_len = line_width % len_rem;
-		/* print line */
-		print_hex_ascii_line(ch, line_len, offset);
-		/* compute total remaining */
-		len_rem = len_rem - line_len;
-		/* shift pointer to remaining bytes to print */
-		ch = ch + line_len;
-		/* add offset */
-		offset = offset + line_width;
-		/* check if we have line width chars or less */
-		if (len_rem <= line_width) {
-			/* print last line and get out */
-			print_hex_ascii_line(ch, len_rem, offset);
-			break;
-		}
-	}
-
-return;
-}
-
-/*
  * app name/banner
  */
 void
@@ -936,62 +916,11 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s --curveseckey <curve25519 secret file> --port <port>\n"
+	printf("Usage: %s [--curveseckey <curve25519 secret file>] --port <port>\n"
            "          --proxyip ... --proxyctlport ... \n"
+           "          [--hardcode-sharedkey <one char>]\n"
+           "          [--dont-compute-ciphertext]\n"
            "          [--device interface]\n", APP_NAME);
-	printf("\n");
-
-return;
-}
-
-/*
- * print data in rows of 16 bytes: offset   hex   ascii
- *
- * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
- */
-void
-print_hex_ascii_line(const u_char *payload, int len, int offset)
-{
-
-	int i;
-	int gap;
-	const u_char *ch;
-
-	/* offset */
-	printf("%05d   ", offset);
-	
-	/* hex */
-	ch = payload;
-	for(i = 0; i < len; i++) {
-		printf("%02x ", *ch);
-		ch++;
-		/* print extra space after 8th byte for visual aid */
-		if (i == 7)
-			printf(" ");
-	}
-	/* print space to handle line less than 8 bytes */
-	if (len < 8)
-		printf(" ");
-	
-	/* fill hex gap with spaces if not full line */
-	if (len < 16) {
-		gap = 16 - len;
-		for (i = 0; i < gap; i++) {
-			printf("   ");
-		}
-	}
-	printf("   ");
-	
-	/* ascii (if printable) */
-	ch = payload;
-	for(i = 0; i < len; i++) {
-		if (isprint(*ch))
-			printf("%c", *ch);
-		else
-			printf(".");
-		ch++;
-	}
-
 	printf("\n");
 
 return;
