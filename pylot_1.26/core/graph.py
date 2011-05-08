@@ -15,7 +15,10 @@
 import sys
 
 try:
-    from pylab import *  # Matplotlib for graphing.  Only used on systems that have it installed.
+    import matplotlib
+    # do this so it doesn't require $DISPLAY env var (ie, a GUI)
+    matplotlib.use('Agg')
+    from matplotlib.pyplot import *  # Matplotlib for graphing.  Only used on systems that have it installed.
 except ImportError, e:
     sys.stderr.write('Matplotlib ImportError: %s\n' % e)
     
