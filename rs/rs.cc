@@ -504,14 +504,8 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 
 void
-print_payload(const u_char *payload, int len);
-
-void
 print_hex_ascii_line(const char *header /* optional */,
                      const unsigned char *payload, int len, int offset);
-
-void
-print_app_banner(void);
 
 void
 print_app_usage(void);
@@ -526,7 +520,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 //	static int count = 0;                   /* packet counter */
 	
 	/* declare pointers to packet headers */
-	const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
+//	const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
 	const struct sniff_ip *ip;              /* The IP header */
 	const struct sniff_tcp *tcp;            /* The TCP header */
     shared_ptr<SynPacket_t> synpkt;
@@ -536,7 +530,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	// printf("\nPacket number %d:\n", count);
 	
 	/* define ethernet header */
-	ethernet = (struct sniff_ethernet*)(packet);
+//	ethernet = (struct sniff_ethernet*)(packet);
 	
 	/* define/compute ip header offset */
 	ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
@@ -895,21 +889,6 @@ int main(int argc, char **argv)
 bail:
     openssl_safe_free(BIO, curvesecretfilebio);
 return 0;
-}
-
-/*
- * app name/banner
- */
-void
-print_app_banner(void)
-{
-
-	printf("%s - %s\n", APP_NAME, APP_DESC);
-	printf("%s\n", APP_COPYRIGHT);
-	printf("%s\n", APP_DISCLAIMER);
-	printf("\n");
-
-return;
 }
 
 /*
