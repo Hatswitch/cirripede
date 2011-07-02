@@ -618,6 +618,10 @@ bail:
     return;
 }
 
+static const EVP_CIPHER *g_signallingcipher = EVP_aes_128_cbc();
+static const u_char g_register_str[] = "register";
+#define REGISTER_STRLEN ((sizeof g_register_str) - 1)
+
 static void
 handleSynPackets()
 {
@@ -667,16 +671,15 @@ handleSynPackets()
 
             u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
             u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
-            const EVP_CIPHER *signallingcipher = EVP_aes_128_cbc();
 
             int retval = EVP_BytesToKey(
-                signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+                g_signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
                 cipherkey, cipheriv);
-            bail_require(retval == signallingcipher->key_len);
+            bail_require(retval == g_signallingcipher->key_len);
 
             u_char rsciphertext[4] = {0};
-            bail_error(encrypt(signallingcipher, cipherkey, cipheriv,
-                               (u_char*)"register", strlen("register"),
+            bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
+                               g_register_str, REGISTER_STRLEN,
                                rsciphertext, sizeof rsciphertext));
             /* if g_dont_cmp_ciphertext is true, then we just accept
              * no matter what.
