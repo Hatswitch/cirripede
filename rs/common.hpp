@@ -105,4 +105,67 @@ namespace Common {
     }                                                                   \
     while (false)
 
+#define safe_free(ptr)                          \
+  do {                                          \
+    if ((ptr)) {                                \
+      free(ptr);                                \
+      ptr = NULL;                               \
+    }                                           \
+  }                                             \
+  while (0)
+
+#define openssl_safe_free(TYPE, ptr)            \
+  do {                                          \
+    if ((ptr)) {                                \
+      TYPE##_free(ptr);                         \
+      ptr = NULL;                               \
+    }                                           \
+  }                                             \
+  while (0)
+
+#define bail_error(err)                                                 \
+  do {                                                                  \
+    if ((err)) {                                                        \
+      printf("error at %s:%d, %s()\n", __FILE__, __LINE__, __func__);   \
+      goto bail;                                                        \
+    }                                                                   \
+  }                                                                     \
+  while (0)
+
+#define bail_null(ptr)                                                  \
+  do {                                                                  \
+    if (NULL == (ptr)) {                                                \
+      printf("NULL error at %s:%d, %s()\n", __FILE__, __LINE__, __func__); \
+      goto bail;                                                        \
+    }                                                                   \
+  }                                                                     \
+  while (0)
+
+#define bail_null_msg(ptr, msg)                                         \
+  do {                                                                  \
+    if (NULL == (ptr)) {                                                \
+      printf("NULL error at %s:%d, %s(): %s\n", __FILE__, __LINE__, __func__, msg); \
+      goto bail;                                                        \
+    }                                                                   \
+  }                                                                     \
+  while (0)
+
+#define bail_require(cond)                                              \
+  do {                                                                  \
+    if (!(cond)) {                                                      \
+      printf("error condition at %s:%d, %s()\n", __FILE__, __LINE__, __func__); \
+      goto bail;                                                        \
+    }                                                                   \
+  }                                                                     \
+  while (0)
+
+#define bail_require_msg(cond, msg)                                     \
+  do {                                                                  \
+    if (!(cond)) {                                                      \
+      printf("error condition at %s:%d, %s(): %s\n", __FILE__, __LINE__, __func__, msg); \
+      goto bail;                                                        \
+    }                                                                   \
+  }                                                                     \
+  while (0)
+
 #endif // COMMON_HPP
