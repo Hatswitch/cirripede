@@ -706,7 +706,7 @@ int main(int argc, char **argv)
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 	pcap_t *handle;				/* packet capture handle */
 
-	string filter_exp = "tcp port ";		/* filter expression [3] */
+	string filter_exp = "tcp ";		/* filter expression [3] */
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
@@ -790,12 +790,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
         exit(-1);
     }
-    if (!port || !(seckeypath || g_hardcode_sharedkey) || !proxyip || !proxyctlport) {
+    if (!(seckeypath || g_hardcode_sharedkey) || !proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
 
-    filter_exp += lexical_cast<string>(port);
+    if (port > 0) {
+        filter_exp += " port ";
+        filter_exp += lexical_cast<string>(port);
+    }
 
     if (!g_hardcode_sharedkey) {
         curvesecretfilebio = BIO_new_file(seckeypath, "rb");
@@ -898,7 +901,8 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s [--curveseckey <curve25519 secret file>] --port <port>\n"
+	printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
+           "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compute-ciphertext]\n"
