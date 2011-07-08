@@ -12,13 +12,14 @@ using std::string;
 
 namespace Common {
 
+#if 0
     class NotYet : public std::runtime_error {
     public:
         NotYet() : std::runtime_error("not yet ... error") {}
         explicit NotYet(const string& s) :
             std::runtime_error("not yet " + s) {}
     };
-
+#endif
 #if 0
     template<typename T>
     bool
