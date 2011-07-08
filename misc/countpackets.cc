@@ -96,7 +96,8 @@ struct sniff_tcp {
 static u_short g_dstport = 0;
 static bool g_synonly = false;
 static uint64_t g_matchedcount = 0;
-static uint64_t g_matchedsize = 0;
+static uint64_t g_matchedAndGood_size = 0;
+static uint64_t g_matchedAndGood_count = 0;
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -109,7 +110,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
     g_matchedcount += 1;
 
-    /* it seems: pcap files dont have MAC layer */
+    /* seems the CAIDA traces have MAC layer removed */
     ip = (struct sniff_ip*)(packet);
     size_ip = IP_HL(ip)*4;
 #if 0
@@ -151,7 +152,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         assert (ntohs(tcp->th_dport) == g_dstport);
     }
 
-    g_matchedsize += ip->ip_len;
+    g_matchedAndGood_count += 1;
+    g_matchedAndGood_size += ntohs(ip->ip_len);
 
     return;
 }
@@ -247,13 +249,15 @@ int main(int argc, char **argv)
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal size of matched packets:\n"
+    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedAndGood_count);
+
+    printf("\n\ntotal size of matched (and good) packets:\n"
            "%llu bytes\n"
            "%.2f MB\n"
            "%.2f GB\n",
-           g_matchedsize,
-           ((double)g_matchedsize) / (1024 * 1024),
-           ((double)g_matchedsize) / (1024 * 1024 * 1024));
+           g_matchedAndGood_size,
+           ((double)g_matchedAndGood_size) / (1024 * 1024),
+           ((double)g_matchedAndGood_size) / (1024 * 1024 * 1024));
 
     /* cleanup */
 
