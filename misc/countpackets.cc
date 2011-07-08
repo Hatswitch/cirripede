@@ -107,19 +107,25 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     int size_ip;
     int size_tcp;
 
+    g_matchedcount += 1;
+
     /* it seems: pcap files dont have MAC layer */
     ip = (struct sniff_ip*)(packet);
     size_ip = IP_HL(ip)*4;
-#if 1
+#if 0
     assert(size_ip >= 20);
 #else
     if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        printf("   * Invalid IP header length: %u bytes ("
+               "matched packet number %lu)\n", size_ip, g_matchedcount);
         return;
     }
 #endif
 
-    assert(IP_V(ip) == 4);
+    if (IP_V(ip) != 4) {
+        printf("ip version %u packet not supported (matched packet number %lu)\n", IP_V(ip), g_matchedcount);
+	return;
+    }
 
     /*
      *  OK, this packet is TCP.
@@ -128,11 +134,11 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     /* define/compute tcp header offset */
     tcp = (struct sniff_tcp*)(packet + size_ip);
     size_tcp = TH_OFF(tcp)*4;
-#if 1
+#if 0
     assert (size_tcp >= 20);
 #else
     if (size_tcp < 20) {
-        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+        printf("   * Invalid TCP header length: %u bytes (matched packet number %lu)\n", size_tcp, g_matchedcount);
         return;
     }
 #endif
@@ -145,7 +151,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         assert (ntohs(tcp->th_dport) == g_dstport);
     }
 
-    g_matchedcount += 1;
     g_matchedsize += ip->ip_len;
 
     return;
