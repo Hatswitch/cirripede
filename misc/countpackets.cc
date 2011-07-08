@@ -22,6 +22,9 @@
 #include <map>
 #include <openssl/rand.h>
 
+static const char rcsid[] =
+    "$Id$";
+
 using std::string;
 using std::cout;
 using std::endl;
