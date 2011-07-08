@@ -153,7 +153,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
 int main(int argc, char **argv)
 {
-    const char *inpcapfilepath = NULL;
+    const char *pcapfilepath = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];      /* error buffer */
     pcap_t *handle;             /* packet capture handle */
 
@@ -188,7 +188,7 @@ int main(int argc, char **argv)
             break;
 
         case 1001:
-            inpcapfilepath = optarg;
+            pcapfilepath = optarg;
             break;
 
         case 1002:
@@ -197,13 +197,13 @@ int main(int argc, char **argv)
         }
     }
 
-    assert(inpcapfilepath != NULL);
+    assert(pcapfilepath != NULL);
 
     /* open input pcap file */
-    handle = pcap_open_offline(inpcapfilepath, errbuf);
+    handle = pcap_open_offline(pcapfilepath, errbuf);
     if (handle == NULL) {
         fprintf(stderr, "Couldn't open input pcap file %s: %s\n",
-                inpcapfilepath, errbuf);
+                pcapfilepath, errbuf);
         exit(EXIT_FAILURE);
     }
 
