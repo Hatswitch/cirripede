@@ -100,6 +100,8 @@ static unsigned long long int g_syncount = 0;
 static unsigned long long int g_synsize = 0;
 static unsigned long long int g_443count = 0;
 static unsigned long long int g_443size = 0;
+static unsigned long long int g_ipv4count = 0;
+static unsigned long long int g_ipv6count = 0;
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -111,11 +113,11 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     int tcphdrlen;
 
     /* seems the CAIDA traces have MAC layer removed */
-    u_char version = (*(packet + g_machdrlen)) >> 4;
+    u_char ip_version = (*(packet + g_machdrlen)) >> 4;
 
     g_matchedcount += 1;
 
-    if (version == 4) {
+    if (ip_version == 4) {
         const struct sniff_ip *ip = (struct sniff_ip*)(packet +
                                                        g_machdrlen);
         iphdrlen = IP_HL(ip)*4;
@@ -129,19 +131,24 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         }
 #endif
 
+        g_ipv4count++;
+
         assert (ip->ip_p == 6); // tcp
         pktlen += ntohs(ip->ip_totallen);
     }
-    else if (version == 6) {
+    else if (ip_version == 6) {
         iphdrlen = 40;
         const struct sniff_ipv6 *ipv6 = (struct sniff_ipv6*)(packet +
                                                              g_machdrlen);
+
+        g_ipv6count++;
+
         assert (ntohs(ipv6->ip_nextheader) == 6); // tcp
         pktlen += ntohs(ipv6->ip_payloadlen) + 40;
     }
     else {
         printf("   * Invalid IP version %u (matched packet number %llu)\n",
-               version, g_matchedcount);
+               ip_version, g_matchedcount);
         exit(EXIT_FAILURE);
     }
 
@@ -156,7 +163,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     assert (tcphdrlen >= 20);
 #else
     if (tcphdrlen < 20) {
-        printf("   * Invalid TCP header length: %u bytes (matched packet number %llu)\n", tcphdrlen, g_matchedcount);
+        printf("   * Invalid TCP header length: %u bytes (matched packet number %llu, IP vers %u)\n",
+               tcphdrlen, g_matchedcount, ip_version);
         return;
     }
 #endif
@@ -247,11 +255,18 @@ int main(int argc, char **argv)
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedcount);
+    printf("\n\ntotal number of matched (and good) packets: %llu "
+           "(%.3f M)\n", g_matchedcount,
+           ((double)g_matchedcount) / (1024 * 1024));
+
+    printf("\n  ipv4 count: %llu (%.3f M)\n"
+           "\n  ipv6 count: %llu (%.3f M)\n",
+           g_ipv4count, ((double)g_ipv4count) / (1024 * 1024),
+           g_ipv6count, ((double)g_ipv6count) / (1024 * 1024));
 
     printf("\n\ntotal count and size of matched packets:\n"
-           "SYN: %llu, %.2f GB (%llu bytes)\n"
-           "443: %llu, %.2f GB (%llu bytes)\n",
+           "SYN: %llu, %.3f GB (%llu bytes)\n"
+           "443: %llu, %.3f GB (%llu bytes)\n",
            g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
            g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size);
 
