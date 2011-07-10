@@ -1,5 +1,5 @@
 
-
+#include <inttypes.h>
 #include <pcap.h>
 #include <stdio.h>
 #include <string.h>
@@ -93,15 +93,13 @@ struct sniff_tcp {
 
 #define log cout << __FILE__ << ":" << __LINE__ << ": "
 
-static u_short g_dstport = 0;
-static bool g_synonly = false;
-static uint64_t g_matchedcount = 0;
+static unsigned long long int g_matchedcount = 0;
 static bool g_nomac = false;
 static int g_machdrlen = SIZE_ETHERNET;
-static uint64_t g_syncount = 0;
-static uint64_t g_synsize = 0;
-static uint64_t g_443count = 0;
-static uint64_t g_443size = 0;
+static unsigned long long int g_syncount = 0;
+static unsigned long long int g_synsize = 0;
+static unsigned long long int g_443count = 0;
+static unsigned long long int g_443size = 0;
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -126,7 +124,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 #else
         if (iphdrlen < 20) {
             printf("   * Invalid IP header length: %u bytes ("
-                   "matched packet number %lu)\n", iphdrlen, g_matchedcount);
+                   "matched packet number %llu)\n", iphdrlen, g_matchedcount);
             return;
         }
 #endif
@@ -142,7 +140,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         pktlen += ntohs(ipv6->ip_payloadlen) + 40;
     }
     else {
-        printf("   * Invalid IP version %u (matched packet number %lu)\n",
+        printf("   * Invalid IP version %u (matched packet number %llu)\n",
                version, g_matchedcount);
         exit(EXIT_FAILURE);
     }
@@ -158,7 +156,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     assert (tcphdrlen >= 20);
 #else
     if (tcphdrlen < 20) {
-        printf("   * Invalid TCP header length: %u bytes (matched packet number %lu)\n", tcphdrlen, g_matchedcount);
+        printf("   * Invalid TCP header length: %u bytes (matched packet number %llu)\n", tcphdrlen, g_matchedcount);
         return;
     }
 #endif
@@ -244,26 +242,18 @@ int main(int argc, char **argv)
                 filter_exp.c_str(), pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
-
-    printf("syn-only: %s\n", g_synonly ? "true" : "false");
-    if (g_dstport > 0) {
-        printf("dst port: %u\n", g_dstport);
-    }
-    else {
-        printf("port: all ports\n");
-    }
     printf("filter: \"%s\"\n", filter_exp.c_str());
 
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal number of matched (and good) packets: %lu\n", g_matchedcount);
+    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedcount);
 
     printf("\n\ntotal count and size of matched packets:\n"
-           "SYN: %lu, %.2f GB\n"
-           "443: %lu, %.2f GB\n",
-           g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024),
-           g_443count, ((double)g_443size) / (1024 * 1024 * 1024));
+           "SYN: %llu, %.2f GB (%llu bytes)\n"
+           "443: %llu, %.2f GB (%llu bytes)\n",
+           g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
+           g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size);
 
     /* cleanup */
 
