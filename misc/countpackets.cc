@@ -258,18 +258,18 @@ int main(int argc, char **argv)
     printf("filter: \"%s\"\n", filter_exp.c_str());
     printf("\ntotal number of matched (and good) packets: %llu "
            "(%.3f M)\n", g_matchedcount,
-           ((double)g_matchedcount) / (1024 * 1024));
+           ((double)g_matchedcount) / (1000 * 1000));
 
     printf("\n  ipv4 count: %llu (%.3f M)\n"
            "\n  ipv6 count: %llu (%.3f M)\n",
-           g_ipv4count, ((double)g_ipv4count) / (1024 * 1024),
-           g_ipv6count, ((double)g_ipv6count) / (1024 * 1024));
+           g_ipv4count, ((double)g_ipv4count) / (1000 * 1000),
+           g_ipv6count, ((double)g_ipv6count) / (1000 * 1000));
 
     printf("\n\ntotal count and size of matched packets:\n"
-           "SYN: %llu, %.3f GB (%llu bytes)\n"
-           "443: %llu, %.3f GB (%llu bytes)\n",
-           g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
-           g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size);
+           "SYN: %.3f M (%llu), %.3f GB (%llu bytes)\n"
+           "443: %.3f M (%llu), %.3f GB (%llu bytes)\n",
+           ((double)g_syncount) / (1000 * 1000), g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
+           ((double)g_443count) / (1000 * 1000), g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size);
 
     /* cleanup */
 
