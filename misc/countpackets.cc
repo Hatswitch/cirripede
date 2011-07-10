@@ -142,7 +142,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         pktlen += ntohs(ipv6->ip_payloadlen) + 40;
     }
     else {
-        printf("   * Invalid IP version %u (matched packet number %u)\n",
+        printf("   * Invalid IP version %u (matched packet number %lu)\n",
                version, g_matchedcount);
         exit(EXIT_FAILURE);
     }
@@ -257,11 +257,11 @@ int main(int argc, char **argv)
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedcount);
+    printf("\n\ntotal number of matched (and good) packets: %lu\n", g_matchedcount);
 
     printf("\n\ntotal count and size of matched packets:\n"
-           "SYN: %llu, %.2f GB\n"
-           "443: %llu, %.2f GB\n",
+           "SYN: %lu, %.2f GB\n"
+           "443: %lu, %.2f GB\n",
            g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024),
            g_443count, ((double)g_443size) / (1024 * 1024 * 1024));
 
