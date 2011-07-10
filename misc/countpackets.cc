@@ -250,12 +250,13 @@ int main(int argc, char **argv)
                 filter_exp.c_str(), pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
-    printf("filter: \"%s\"\n", filter_exp.c_str());
 
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal number of matched (and good) packets: %llu "
+    printf("Id: %s\n", rcsid);
+    printf("filter: \"%s\"\n", filter_exp.c_str());
+    printf("\ntotal number of matched (and good) packets: %llu "
            "(%.3f M)\n", g_matchedcount,
            ((double)g_matchedcount) / (1024 * 1024));
 
