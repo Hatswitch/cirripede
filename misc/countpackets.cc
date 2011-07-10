@@ -35,23 +35,13 @@ using boost::shared_ptr;
 using boost::make_shared;
 
 // /* ethernet headers are always exactly 14 bytes [1] */
-// #define SIZE_ETHERNET 14
-
-// /* Ethernet addresses are 6 bytes */
-// #define ETHER_ADDR_LEN	6
-
-// /* Ethernet header */
-// struct sniff_ethernet {
-//         u_char  ether_dhost[ETHER_ADDR_LEN];    /* destination host address */
-//         u_char  ether_shost[ETHER_ADDR_LEN];    /* source host address */
-//         u_short ether_type;                     /* IP? ARP? RARP? etc */
-// };
+#define SIZE_ETHERNET 14
 
 /* IP header */
 struct sniff_ip {
         u_char  ip_vhl;                 /* version << 4 | header length >> 2 */
         u_char  ip_tos;                 /* type of service */
-        u_short ip_len;                 /* total length */
+        u_short ip_totallen;                 /* total length */
         u_short ip_id;                  /* identification */
         u_short ip_off;                 /* fragment offset field */
         #define IP_RF 0x8000            /* reserved fragment flag */
@@ -65,6 +55,16 @@ struct sniff_ip {
 };
 #define IP_HL(ip)               (((ip)->ip_vhl) & 0x0f)
 #define IP_V(ip)                (((ip)->ip_vhl) >> 4)
+
+
+/* IPv6 header */
+struct sniff_ipv6 {
+        u_char  ip_vhl;                 /* version << 4 */
+        u_char  dontcare[3];
+        u_short ip_payloadlen;
+        u_char  ip_nextheader;
+        u_char  dontcare2[33];
+};
 
 /* TCP header */
 typedef u_int tcp_seq;
@@ -96,36 +96,55 @@ struct sniff_tcp {
 static u_short g_dstport = 0;
 static bool g_synonly = false;
 static uint64_t g_matchedcount = 0;
-static uint64_t g_matchedAndGood_size = 0;
-static uint64_t g_matchedAndGood_count = 0;
+static bool g_nomac = false;
+static int g_machdrlen = SIZE_ETHERNET;
+static uint64_t g_syncount = 0;
+static uint64_t g_synsize = 0;
+static uint64_t g_443count = 0;
+static uint64_t g_443size = 0;
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
     /* declare pointers to packet headers */
-    const struct sniff_ip *ip;              /* The IP header */
     const struct sniff_tcp *tcp;            /* The TCP header */
-    int size_ip;
-    int size_tcp;
+    uint32_t pktlen = 0; // whole ip packet len (header+payload)
+    int iphdrlen;
+    int tcphdrlen;
+
+    /* seems the CAIDA traces have MAC layer removed */
+    u_char version = (*(packet + g_machdrlen)) >> 4;
 
     g_matchedcount += 1;
 
-    /* seems the CAIDA traces have MAC layer removed */
-    ip = (struct sniff_ip*)(packet);
-    size_ip = IP_HL(ip)*4;
+    if (version == 4) {
+        const struct sniff_ip *ip = (struct sniff_ip*)(packet +
+                                                       g_machdrlen);
+        iphdrlen = IP_HL(ip)*4;
 #if 0
-    assert(size_ip >= 20);
+        assert(iphdrlen >= 20);
 #else
-    if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes ("
-               "matched packet number %lu)\n", size_ip, g_matchedcount);
-        return;
-    }
+        if (iphdrlen < 20) {
+            printf("   * Invalid IP header length: %u bytes ("
+                   "matched packet number %lu)\n", iphdrlen, g_matchedcount);
+            return;
+        }
 #endif
 
-    if (IP_V(ip) != 4) {
-        printf("ip version %u packet not supported (matched packet number %lu)\n", IP_V(ip), g_matchedcount);
-	return;
+        assert (ip->ip_p == 6); // tcp
+        pktlen += ntohs(ip->ip_totallen);
+    }
+    else if (version == 6) {
+        iphdrlen = 40;
+        const struct sniff_ipv6 *ipv6 = (struct sniff_ipv6*)(packet +
+                                                             g_machdrlen);
+        assert (ntohs(ipv6->ip_nextheader) == 6); // tcp
+        pktlen += ntohs(ipv6->ip_payloadlen) + 40;
+    }
+    else {
+        printf("   * Invalid IP version %u (matched packet number %u)\n",
+               version, g_matchedcount);
+        exit(EXIT_FAILURE);
     }
 
     /*
@@ -133,27 +152,26 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
      */
 
     /* define/compute tcp header offset */
-    tcp = (struct sniff_tcp*)(packet + size_ip);
-    size_tcp = TH_OFF(tcp)*4;
+    tcp = (struct sniff_tcp*)(packet + g_machdrlen + iphdrlen);
+    tcphdrlen = TH_OFF(tcp)*4;
 #if 0
-    assert (size_tcp >= 20);
+    assert (tcphdrlen >= 20);
 #else
-    if (size_tcp < 20) {
-        printf("   * Invalid TCP header length: %u bytes (matched packet number %lu)\n", size_tcp, g_matchedcount);
+    if (tcphdrlen < 20) {
+        printf("   * Invalid TCP header length: %u bytes (matched packet number %lu)\n", tcphdrlen, g_matchedcount);
         return;
     }
 #endif
 
-    if (g_synonly) {
-        assert(tcp->th_flags == TH_SYN);
+    if (tcp->th_flags == TH_SYN) {
+        g_syncount ++;
+        g_synsize += pktlen;
     }
 
-    if (g_dstport > 0) {
-        assert (ntohs(tcp->th_dport) == g_dstport);
+    if (ntohs(tcp->th_dport) == 443) {
+        g_443count ++;
+        g_443size += pktlen;
     }
-
-    g_matchedAndGood_count += 1;
-    g_matchedAndGood_size += ntohs(ip->ip_len);
 
     return;
 }
@@ -170,9 +188,8 @@ int main(int argc, char **argv)
     int long_index;
 
     struct option long_options[] = {
-        {"dstport", required_argument, 0, 1000},
         {"pcapfilepath", required_argument, 0, 1001},
-        {"synonly", no_argument, 0, 1002},
+        {"nomac", no_argument, 0, 1003},
         {0, 0, 0, 0},
     };
 
@@ -190,16 +207,13 @@ int main(int argc, char **argv)
             cout << endl;
             break;
 
-        case 1000:
-            g_dstport = strtod(optarg, NULL);
-            break;
-
         case 1001:
             pcapfilepath = optarg;
             break;
 
-        case 1002:
-            g_synonly = true;
+        case 1003:
+            g_nomac = true;
+            g_machdrlen = 0;
             break;
         }
     }
@@ -214,13 +228,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    if (g_dstport > 0) {
-        filter_exp += " and dst port " + lexical_cast<string>(g_dstport);
-    }
-
-    if (g_synonly) {
-        filter_exp += " and tcp[tcpflags] == tcp-syn";
-    }
+    filter_exp += " and (tcp[tcpflags] == tcp-syn or dst port 443)";
 
     memset(&fp, 0, sizeof fp);
     /* compile the filter expression */
@@ -249,15 +257,13 @@ int main(int argc, char **argv)
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
-    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedAndGood_count);
+    printf("\n\ntotal number of matched (and good) packets: %llu\n", g_matchedcount);
 
-    printf("\n\ntotal size of matched (and good) packets:\n"
-           "%llu bytes\n"
-           "%.2f MB\n"
-           "%.2f GB\n",
-           g_matchedAndGood_size,
-           ((double)g_matchedAndGood_size) / (1024 * 1024),
-           ((double)g_matchedAndGood_size) / (1024 * 1024 * 1024));
+    printf("\n\ntotal count and size of matched packets:\n"
+           "SYN: %llu, %.2f GB\n"
+           "443: %llu, %.2f GB\n",
+           g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024),
+           g_443count, ((double)g_443size) / (1024 * 1024 * 1024));
 
     /* cleanup */
 
