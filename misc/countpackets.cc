@@ -266,6 +266,7 @@ int main(int argc, char **argv)
     pcap_loop(handle, 0, got_packet, NULL);
 
     printf("Id: %s\n", rcsid);
+    printf("pcapfilepath: %s\n", pcapfilepath);
     printf("filter: \"%s\"\n", filter_exp.c_str());
     printf("\nnumber of bpf-filter-matched packets (though might count packets "
            "we rejected): %llu (%.3f M)\n", g_matchedcount,
