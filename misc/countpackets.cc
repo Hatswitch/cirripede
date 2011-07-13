@@ -131,9 +131,14 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         }
 #endif
 
+        if (ip->ip_p != 6) { // tcp
+            printf("   * unexpected proto in ipv4 packet: %u ("
+                   "matched packet number %llu)\n", ip->ip_p, g_matchedcount);
+            return;
+        }
+
         g_ipv4count++;
 
-        assert (ip->ip_p == 6); // tcp
         pktlen += ntohs(ip->ip_totallen);
     }
     else if (ip_version == 6) {
@@ -141,15 +146,21 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         const struct sniff_ipv6 *ipv6 = (struct sniff_ipv6*)(packet +
                                                              g_machdrlen);
 
+        if (ntohs(ipv6->ip_nextheader) == 6) { // tcp
+            printf("   * unexpected proto in ipv6 packet: %u ("
+                   "matched packet number %llu)\n", ntohs(ipv6->ip_nextheader),
+                   g_matchedcount);
+            return;
+        }
+
         g_ipv6count++;
 
-        assert (ntohs(ipv6->ip_nextheader) == 6); // tcp
         pktlen += ntohs(ipv6->ip_payloadlen) + 40;
     }
     else {
         printf("   * Invalid IP version %u (matched packet number %llu)\n",
                ip_version, g_matchedcount);
-        exit(EXIT_FAILURE);
+        return;
     }
 
     /*
@@ -256,16 +267,16 @@ int main(int argc, char **argv)
 
     printf("Id: %s\n", rcsid);
     printf("filter: \"%s\"\n", filter_exp.c_str());
-    printf("\ntotal number of matched (and good) packets: %llu "
-           "(%.3f M)\n", g_matchedcount,
+    printf("\nnumber of bpf-filter-matched packets (though might count packets "
+           "we rejected): %llu (%.3f M)\n", g_matchedcount,
            ((double)g_matchedcount) / (1000 * 1000));
 
-    printf("\n  ipv4 count: %llu (%.3f M)\n"
-           "\n  ipv6 count: %llu (%.3f M)\n",
+    printf("  ipv4 count: %llu (%.3f M)\n"
+           "  ipv6 count: %llu (%.3f M)\n",
            g_ipv4count, ((double)g_ipv4count) / (1000 * 1000),
            g_ipv6count, ((double)g_ipv6count) / (1000 * 1000));
 
-    printf("\n\ntotal count and size of matched packets:\n"
+    printf("\ntotal count and size of matched packets:\n"
            "SYN: %.3f M (%llu), %.3f GB (%llu bytes)\n"
            "443: %.3f M (%llu), %.3f GB (%llu bytes)\n",
            ((double)g_syncount) / (1000 * 1000), g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
