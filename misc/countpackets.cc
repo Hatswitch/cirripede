@@ -94,7 +94,6 @@ struct sniff_tcp {
 #define log cout << __FILE__ << ":" << __LINE__ << ": "
 
 static unsigned long long int g_matchedcount = 0;
-static bool g_nomac = false;
 static int g_machdrlen = SIZE_ETHERNET;
 static unsigned long long int g_syncount = 0;
 static unsigned long long int g_synsize = 0;
@@ -102,6 +101,7 @@ static unsigned long long int g_443count = 0;
 static unsigned long long int g_443size = 0;
 static unsigned long long int g_ipv4count = 0;
 static unsigned long long int g_ipv6count = 0;
+static bool g_count_ipv6 = true;
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -142,6 +142,9 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         pktlen += ntohs(ip->ip_totallen);
     }
     else if (ip_version == 6) {
+        if (!g_count_ipv6) {
+            return;
+        }
         iphdrlen = 40;
         const struct sniff_ipv6 *ipv6 = (struct sniff_ipv6*)(packet +
                                                              g_machdrlen);
@@ -185,7 +188,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         g_synsize += pktlen;
     }
 
-    if (ntohs(tcp->th_dport) == 443) {
+    if (ntohs(tcp->th_dport) == 443 || ntohs(tcp->th_sport) == 443) {
         g_443count ++;
         g_443size += pktlen;
     }
@@ -206,7 +209,8 @@ int main(int argc, char **argv)
 
     struct option long_options[] = {
         {"pcapfilepath", required_argument, 0, 1001},
-        {"nomac", no_argument, 0, 1003},
+        {"no-mac", no_argument, 0, 1003},
+        {"no-ipv6", no_argument, 0, 1004},
         {0, 0, 0, 0},
     };
 
@@ -229,8 +233,11 @@ int main(int argc, char **argv)
             break;
 
         case 1003:
-            g_nomac = true;
             g_machdrlen = 0;
+            break;
+
+        case 1004:
+            g_count_ipv6 = false;
             break;
         }
     }
@@ -245,7 +252,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    filter_exp += " and (tcp[tcpflags] == tcp-syn or dst port 443)";
+    filter_exp += " and (tcp[tcpflags] == tcp-syn or port 443)";
 
     memset(&fp, 0, sizeof fp);
     /* compile the filter expression */
@@ -267,6 +274,8 @@ int main(int argc, char **argv)
 
     printf("Id: %s\n", rcsid);
     printf("pcapfilepath: %s\n", pcapfilepath);
+    printf("no-mac: %s\n", g_machdrlen == 0 ? "true" : "false");
+    printf("no-ipv6: %s\n", g_count_ipv6 ? "false" : "true");
     printf("filter: \"%s\"\n", filter_exp.c_str());
     printf("\nnumber of bpf-filter-matched packets (though might count packets "
            "we rejected): %llu (%.3f M)\n", g_matchedcount,
