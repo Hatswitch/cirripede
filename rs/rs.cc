@@ -454,6 +454,8 @@ static ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
+static int g_drCtlSocket = -1;
+static struct sockaddr_in g_drAddr;
 bool g_verbose = false;
 bool g_dont_cmp_ciphertext = false;
 bool g_hardcode_sharedkey = false;
@@ -612,6 +614,27 @@ bail:
     return;
 }
 
+static void
+notifyDR(const uint32_t& src_ip)
+{
+    int msglen = 4;
+    uint32_t ip = htonl(src_ip);
+
+    bail_require(g_drCtlSocket > -1);
+
+    /* 4 for src ip */
+    static u_char msg[4];
+
+    memcpy(msg + 0, &ip, 4);
+
+    /* best effort, no guarantee */
+    bail_require(
+        msglen == sendto(g_drCtlSocket, msg, msglen, MSG_DONTWAIT,
+                         (struct sockaddr*)&g_drAddr, sizeof g_drAddr));
+bail:
+    return;
+}
+
 static const EVP_CIPHER *g_signallingcipher = EVP_aes_128_cbc();
 static const u_char g_register_str[] = "register";
 #define REGISTER_STRLEN ((sizeof g_register_str) - 1)
@@ -685,6 +708,7 @@ handleSynPackets()
                 cs->_pktcount = 0;
 
                 notifyProxy(ip, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
+                notifyDR(ip);
             }
             else {
                 log << "\n   ciphertext does not match" << endl;
@@ -717,6 +741,8 @@ int main(int argc, char **argv)
     const char *seckeypath = NULL;
     const char *proxyip = NULL;
     u_short proxyctlport = 0;
+    const char *drIP = NULL;
+    u_short drCtlPort = 0;
     boost::thread synpkthandler;
     BIO *curvesecretfilebio = NULL;
 
@@ -729,6 +755,8 @@ int main(int argc, char **argv)
         {"verbose", no_argument, 0, 1005},
         {"dont-compare-ciphertext", no_argument, 0, 1006},
         {"hardcode-sharedkey", required_argument, 0, 1007},
+        {"drIP", required_argument, 0, 1008},
+        {"drCtlPort", required_argument, 0, 1009},
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -779,6 +807,14 @@ int main(int argc, char **argv)
                    sizeof g_hardcoded_sharedkey);
             break;
 
+        case 1008:
+            drIP = optarg;
+            break;
+
+        case 1009:
+            drCtlPort = strtod(optarg, NULL);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
@@ -825,6 +861,15 @@ int main(int argc, char **argv)
     g_proxyaddr.sin_family = AF_INET;
     g_proxyaddr.sin_addr.s_addr=inet_addr(proxyip);
     g_proxyaddr.sin_port=htons(proxyctlport);
+
+    /* create control socket to the DR */
+    g_drCtlSocket = socket(PF_INET, SOCK_DGRAM, 0);
+    bail_require(g_drCtlSocket != -1);
+
+    bzero(&g_drAddr,sizeof(g_drAddr));
+    g_drAddr.sin_family = AF_INET;
+    g_drAddr.sin_addr.s_addr=inet_addr(drIP);
+    g_drAddr.sin_port=htons(drCtlPort);
 
 	if (dev == NULL) {
 		/* find a capture device if not specified on command-line */
@@ -904,6 +949,7 @@ print_app_usage(void)
 	printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
+           "          --drIP ... --drCtlPort ... \n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compute-ciphertext]\n"
            "          [--device interface]\n", APP_NAME);
