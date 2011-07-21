@@ -11,7 +11,7 @@
 using std::string;
 
 namespace Common {
-
+#if 0
     class NotYet : public std::runtime_error {
     public:
         NotYet() : std::runtime_error("not yet ... error") {}
@@ -19,7 +19,6 @@ namespace Common {
             std::runtime_error("not yet " + s) {}
     };
 
-#if 0
     template<typename T>
     bool
     inVectorOfPtrs(const std::vector<shared_ptr<T> >& v, const shared_ptr<T>& e)
