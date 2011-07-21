@@ -369,11 +369,12 @@ typedef enum  {
 class ClientState_t {
 public:
     ClientState_t()
-        : _state(CS_ST_PENDING), _pktcount(0) {}
+        : _state(CS_ST_PENDING), _pktcount(0), _lastSeen(time(NULL)) {}
 
     u_char _curvepubkey[CURVE25519_KEYSIZE];
     client_state_t _state;
     u_short _pktcount;
+    time_t _lastSeen;
 };
 
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
@@ -495,6 +496,9 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
     ///// at this point, cs is a valid entry in the map /////
 
+    // update last seen
+    cs->_lastSeen = time(NULL);
+
     // increment first
     cs->_pktcount += 1;
 
@@ -595,6 +599,24 @@ notifyDR(const uint32_t& src_ip)
         msglen == sendto(g_drCtlSocket, msg, msglen, MSG_DONTWAIT,
                          (struct sockaddr*)&g_drAddr, sizeof g_drAddr));
 bail:
+    return;
+}
+
+static void
+collectGarbage()
+{
+    // loop thru the g_clients
+    const time_t now = time(NULL);
+    map<uint32_t, shared_ptr<ClientState_t> >::iterator cit = g_clients.begin();
+    while (cit != g_clients.end()) {
+        const shared_ptr<ClientState_t>& cs = cit->second;
+        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + 60))) {
+            g_clients.erase(cit++);
+        }
+        else {
+            ++cit;
+        }
+    }
     return;
 }
 
@@ -798,7 +820,16 @@ int main(int argc, char **argv)
 
     const u_char *packet;		/* The actual packet */
     struct pcap_pkthdr header;
+    time_t lastGarbageCollection;
+    lastGarbageCollection = time(NULL);
     while (true) {
+        {
+            time_t now = time(NULL);
+            if (now > (lastGarbageCollection + 30)) {
+                lastGarbageCollection = now;
+                collectGarbage();
+            }
+        }
         packet = pcap_next(handle, &header);
         got_packet(NULL, &header, packet);
     }
