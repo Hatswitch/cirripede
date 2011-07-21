@@ -298,69 +298,6 @@ struct sniff_tcp {
 
 #define log cout << __FILE__ << ":" << __LINE__ << ": "
 
-#define safe_free(ptr)                          \
-  do {                                          \
-    if ((ptr)) {                                \
-      free(ptr);                                \
-      ptr = NULL;                               \
-    }                                           \
-  }                                             \
-  while (0)
-
-#define openssl_safe_free(TYPE, ptr)            \
-  do {                                          \
-    if ((ptr)) {                                \
-      TYPE##_free(ptr);                         \
-      ptr = NULL;                               \
-    }                                           \
-  }                                             \
-  while (0)
-
-#define bail_error(err)                                                 \
-  do {                                                                  \
-    if ((err)) {                                                        \
-      printf("error at %s:%d, %s()\n", __FILE__, __LINE__, __func__);   \
-      goto bail;                                                        \
-    }                                                                   \
-  }                                                                     \
-  while (0)
-
-#define bail_null(ptr)                                                  \
-  do {                                                                  \
-    if (NULL == (ptr)) {                                                \
-      printf("NULL error at %s:%d, %s()\n", __FILE__, __LINE__, __func__); \
-      goto bail;                                                        \
-    }                                                                   \
-  }                                                                     \
-  while (0)
-
-#define bail_null_msg(ptr, msg)                                         \
-  do {                                                                  \
-    if (NULL == (ptr)) {                                                \
-      printf("NULL error at %s:%d, %s(): %s\n", __FILE__, __LINE__, __func__, msg); \
-      goto bail;                                                        \
-    }                                                                   \
-  }                                                                     \
-  while (0)
-
-#define bail_require(cond)                                              \
-  do {                                                                  \
-    if (!(cond)) {                                                      \
-      printf("error condition at %s:%d, %s()\n", __FILE__, __LINE__, __func__); \
-      goto bail;                                                        \
-    }                                                                   \
-  }                                                                     \
-  while (0)
-
-#define bail_require_msg(cond, msg)                                     \
-  do {                                                                  \
-    if (!(cond)) {                                                      \
-      printf("error condition at %s:%d, %s(): %s\n", __FILE__, __LINE__, __func__, msg); \
-      goto bail;                                                        \
-    }                                                                   \
-  }                                                                     \
-  while (0)
-
 #define CURVE25519_KEYSIZE (32)
 
 /*
@@ -519,10 +456,7 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
 
-//	static int count = 0;                   /* packet counter */
-	
 	/* declare pointers to packet headers */
-//	const struct sniff_ethernet *ethernet;  /* The ethernet header [1] */
 	const struct sniff_ip *ip;              /* The IP header */
 	const struct sniff_tcp *tcp;            /* The TCP header */
     shared_ptr<SynPacket_t> synpkt;
@@ -531,8 +465,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	
 	// printf("\nPacket number %d:\n", count);
 	
-	/* define ethernet header */
-//	ethernet = (struct sniff_ethernet*)(packet);
 	
 	/* define/compute ip header offset */
 	ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
@@ -547,25 +479,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	// printf("         To: %s\n", inet_ntoa(ip->ip_dst));
 
     bail_require_msg(ip->ip_p == IPPROTO_TCP, "getting non-TCP packets");
-
-	// /* determine protocol */	
-	// switch(ip->ip_p) {
-	// 	case IPPROTO_TCP:
-	// 		printf("   Protocol: TCP\n");
-	// 		break;
-	// 	case IPPROTO_UDP:
-	// 		printf("   Protocol: UDP\n");
-	// 		return;
-	// 	case IPPROTO_ICMP:
-	// 		printf("   Protocol: ICMP\n");
-	// 		return;
-	// 	case IPPROTO_IP:
-	// 		printf("   Protocol: IP\n");
-	// 		return;
-	// 	default:
-	// 		printf("   Error: getting non-TCP packets\n");
-	// 		return;
-	// }
 	
 	/*
 	 *  OK, this packet is TCP.
