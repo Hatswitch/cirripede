@@ -194,7 +194,14 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         struct timeval elapsedtime;
         struct timeval newtscopy = header->ts;
 
-        assert (timercmp(&newtscopy, &g_lastArrival, >));
+        if (timercmp(&newtscopy, &g_lastArrival, <)) {
+            printf(" * matched packet num %llu has smaller timestamp than "
+                   " the last matched packet\n",
+                   g_matchedcount);
+            // resetting g_lastArrival
+            bzero(&g_lastArrival, sizeof g_lastArrival);
+            return;
+        }
 
         timersub(&newtscopy, &g_lastArrival, &elapsedtime);
 
