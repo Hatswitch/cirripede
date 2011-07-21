@@ -99,6 +99,8 @@ static unsigned long long int g_syncount = 0;
 static unsigned long long int g_synsize = 0;
 static unsigned long long int g_443count = 0;
 static unsigned long long int g_443size = 0;
+static unsigned long long int g_443syncount = 0;
+static unsigned long long int g_443synsize = 0;
 static unsigned long long int g_ipv4count = 0;
 static unsigned long long int g_ipv6count = 0;
 static bool g_count_ipv6 = true;
@@ -191,6 +193,14 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     if (ntohs(tcp->th_dport) == 443 || ntohs(tcp->th_sport) == 443) {
         g_443count ++;
         g_443size += pktlen;
+
+    }
+
+    if (tcp->th_flags == TH_SYN &&
+        (ntohs(tcp->th_dport) == 443 || ntohs(tcp->th_sport) == 443))
+    {
+        g_443syncount ++;
+        g_443synsize += pktlen;
     }
 
     return;
@@ -288,9 +298,11 @@ int main(int argc, char **argv)
 
     printf("\ntotal count and size of matched packets:\n"
            "SYN: %.3f M (%llu), %.3f GB (%llu bytes)\n"
-           "443: %.3f M (%llu), %.3f GB (%llu bytes)\n",
+           "443: %.3f M (%llu), %.3f GB (%llu bytes)\n"
+           "SYNon443: %.3f M (%llu), %.3f GB (%llu bytes)\n",
            ((double)g_syncount) / (1000 * 1000), g_syncount, ((double)g_synsize) / (1024 * 1024 * 1024), g_synsize,
-           ((double)g_443count) / (1000 * 1000), g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size);
+           ((double)g_443count) / (1000 * 1000), g_443count, ((double)g_443size) / (1024 * 1024 * 1024), g_443size,
+           ((double)g_443syncount) / (1000 * 1000), g_443syncount, ((double)g_443synsize) / (1024 * 1024 * 1024), g_443synsize);
 
     /* cleanup */
 
