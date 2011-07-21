@@ -38,7 +38,7 @@ def run(fpath):
             if not interval in d:
                 d[interval] = 0
                 pass
-            d[interval] += 1
+            d[interval] += pktcount
 #            print
             pass
         pass
