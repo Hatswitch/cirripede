@@ -219,6 +219,11 @@
 #include <boost/make_shared.hpp>
 #include <map>
 #include "common.hpp"
+#include <log4cxx/logger.h>
+#include <log4cxx/basicconfigurator.h>
+#include <log4cxx/layout.h>
+#include <log4cxx/patternlayout.h>
+#include <sys/prctl.h>
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -235,6 +240,10 @@ using std::map;
 using boost::lexical_cast;
 using boost::shared_ptr;
 using boost::make_shared;
+
+using namespace log4cxx;
+
+static LoggerPtr g_logger = log4cxx::Logger::getRootLogger();
 
 // we only need upto the tcp sequence number
 #define SNAP_LEN (SIZE_ETHERNET + 60 + 2)
@@ -296,7 +305,9 @@ struct sniff_tcp {
         u_short th_urp;                 /* urgent pointer */
 };
 
-#define log cout << __FILE__ << ":" << __LINE__ << ": "
+//#define MYLOG(x) LOG4CXX_INFO(g_logger, __FILE__ << ":" << __LINE__ << ": " << x)
+#define MYLOG(x) LOG4CXX_INFO(g_logger, x)
+#define MYLOGINFO(x) LOG4CXX_INFO(g_logger, x)
 
 #define CURVE25519_KEYSIZE (32)
 
@@ -380,14 +391,15 @@ typedef enum  {
 class ClientState_t {
 public:
     ClientState_t()
-        : _state(CS_ST_PENDING), _pktcount(0) {}
+        : _state(CS_ST_PENDING), _pktcount(0), _lastSeen(time(NULL)) {}
 
     u_char _curvepubkey[CURVE25519_KEYSIZE];
     client_state_t _state;
     u_short _pktcount;
+    time_t _lastSeen;
 };
 
-static ThreadSafeQueue<shared_ptr<SynPacket_t> > g_synpackets;
+
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
@@ -397,6 +409,17 @@ bool g_verbose = false;
 bool g_dont_cmp_ciphertext = false;
 bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
+
+static uint32_t g_ipmask = 0;
+
+#define ISPOWEROF2(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
+
+#define MASK_IP(ip) ((ip) & g_ipmask)
+
+//#define IP_TO_SYNQUEUE(ip) (g_SYNqueues[ MASK((ip)) ])
+
+// map from masked IP address to the syn packet queue
+static map<uint32_t, shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > > g_SYNqueues;
 
 int
 encrypt(const EVP_CIPHER *cipher,
@@ -463,8 +486,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	int size_ip;
 	int size_tcp;
 	
-	// printf("\nPacket number %d:\n", count);
-	
 	
 	/* define/compute ip header offset */
 	ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
@@ -492,10 +513,12 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 		return;
 	}
 
-    bail_require_msg(tcp->th_flags & TH_SYN, "getting non-SYN packets");
+    bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
 
     synpkt = make_shared<SynPacket_t>(ip->ip_src.s_addr, (u_char*)&(tcp->th_seq));
-    g_synpackets.put(synpkt);
+
+    // put it into the appropriate queue
+    g_SYNqueues[ MASK_IP(ip->ip_src.s_addr) ]->put(synpkt);
 
 bail:
     return;
@@ -552,13 +575,50 @@ static const EVP_CIPHER *g_signallingcipher = EVP_aes_128_cbc();
 static const u_char g_register_str[] = "register";
 #define REGISTER_STRLEN ((sizeof g_register_str) - 1)
 
+
 static void
-handleSynPackets()
+collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
+               const time_t& now)
 {
-    static map<uint32_t, shared_ptr<ClientState_t> > clients;
+    // loop thru the g_clients
+    MYLOGINFO("starting garbage collection");
+    map<uint32_t, shared_ptr<ClientState_t> >::iterator cit = clients.begin();
+    while (cit != clients.end()) {
+        const shared_ptr<ClientState_t>& cs = cit->second;
+        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + 60))) {
+            clients.erase(cit++);
+        }
+        else {
+            ++cit;
+        }
+    }
+    MYLOGINFO("starting garbage collection");
+    return;
+}
+
+void
+handleSynPackets(const string& threadname,
+                 shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > synpackets)
+{
+    /* using shared_ptr here for the valueof the map here is not a
+     * must. just whatever performs better.
+     */
+    map<uint32_t, shared_ptr<ClientState_t> > clients;
+    time_t lastGarbageCollection = time(NULL);
+
+    assert (threadname.length() < 16);
+    assert (0 == prctl(PR_SET_NAME, threadname.c_str(), 0,0,0));
+
+    MYLOG("thread " << threadname);
 
     while (true) {
-        shared_ptr<SynPacket_t> synpkt = g_synpackets.get();
+        const time_t now = time(NULL);
+        if (now > (lastGarbageCollection + 30)) { // collect garbage every 30 seconds
+            lastGarbageCollection = now;
+            collectGarbage(clients, now);
+        }
+
+        shared_ptr<SynPacket_t> synpkt = synpackets->get();
         if (synpkt == NULL) {
             continue;
         }
@@ -574,11 +634,13 @@ handleSynPackets()
             clients[ip] = cs;
             struct in_addr tmp;
             tmp.s_addr = ip;
-            log << " new pending client ip: " << inet_ntoa(tmp) << endl;
-            log << "new map size: " << clients.size() << endl;
+//            log << " new pending client ip: " << inet_ntoa(tmp) << endl;
+//            log << "new map size: " << clients.size() << endl;
         }
 
         ///// at this point, cs is a valid entry in the map /////
+
+        cs->_lastSeen = time(NULL);
 
         // increment first
         cs->_pktcount += 1;
@@ -615,7 +677,7 @@ handleSynPackets()
              * no matter what.
              */
             if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
-                log << "\n   ciphertext matched (or not compared)! notifying proxy about client" << endl;
+                MYLOGINFO("   ciphertext matched (or not compared)! notifying proxy about client");
                 cs->_state = CS_ST_REGISTERED;
                 // reset pkt count
                 cs->_pktcount = 0;
@@ -624,10 +686,10 @@ handleSynPackets()
                 notifyDR(ip);
             }
             else {
-                log << "\n   ciphertext does not match" << endl;
+                MYLOGINFO("   ciphertext does not match");
                 // remove cs from map
                 clients.erase(ip);
-                log << "   client removed from map -> new map size: " << clients.size() << endl;
+                MYLOGINFO("   client removed from map -> new map size: " << clients.size());
             }
         }
 bail:
@@ -643,11 +705,10 @@ int main(int argc, char **argv)
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 	pcap_t *handle;				/* packet capture handle */
 
-	string filter_exp = "tcp ";		/* filter expression [3] */
+	string filter_exp = "tcp and (tcp[tcpflags] == tcp-syn)"; /* filter expression [3] */
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
-	int num_packets = 10;			/* number of packets to capture */
     int opt;
     int long_index;
     u_short port = 0;
@@ -658,6 +719,8 @@ int main(int argc, char **argv)
     u_short drCtlPort = 0;
     boost::thread synpkthandler;
     BIO *curvesecretfilebio = NULL;
+    int numThreads = 1;
+    AppenderList al;
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
@@ -670,6 +733,7 @@ int main(int argc, char **argv)
         {"hardcode-sharedkey", required_argument, 0, 1007},
         {"drIP", required_argument, 0, 1008},
         {"drCtlPort", required_argument, 0, 1009},
+        {"numThreads", required_argument, 0, 1010}, // should be power of 2
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -728,12 +792,18 @@ int main(int argc, char **argv)
             drCtlPort = strtod(optarg, NULL);
             break;
 
+        case 1010:
+            numThreads = strtod(optarg, NULL);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
     }
+
+    bail_require_msg(ISPOWEROF2(numThreads), "numThreads must be power of 2");
 
     if (seckeypath && g_hardcode_sharedkey) {
         fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
@@ -764,6 +834,17 @@ int main(int argc, char **argv)
             print_hex_ascii_line("hardcoded sharedkey", g_hardcoded_sharedkey,
                                  sizeof g_hardcoded_sharedkey, 0);
         }
+    }
+
+    // Set up a simple configuration that logs on the console.
+    log4cxx::BasicConfigurator::configure();
+    g_logger->setLevel(log4cxx::Level::getInfo());
+
+    al= g_logger->getAllAppenders();
+
+    for (uint32_t i = 0; i < al.size(); ++i) {
+        log4cxx::PatternLayoutPtr layout(new log4cxx::PatternLayout("%d [%t] (%F:%L) - %m%n"));
+        al[i]->setLayout(layout);
     }
 
     /* create control socket to the proxy */
@@ -804,7 +885,6 @@ int main(int argc, char **argv)
 
 	/* print capture info */
 	printf("Device: %s\n", dev);
-	printf("Number of packets: %d\n", num_packets);
 	printf("Filter expression: %s\n", filter_exp.c_str());
 
 	/* open capture device */
@@ -835,10 +915,26 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-    synpkthandler = boost::thread(handleSynPackets);
+    for (int i = 0; i < numThreads; ++i) {
+        // create a clients table for each thread
+
+        // partition the clients based on last 16 bits of ip address.
+        uint32_t masked_ip = (i << 15);
+        assert ((masked_ip & 1) == 0); // make sure 1's are not shifted in
+
+        g_SYNqueues[masked_ip] = make_shared<ThreadSafeQueue<shared_ptr<SynPacket_t> > >();
+
+        // XXX/leakin
+        new boost::thread(
+            handleSynPackets, "rs-" + boost::lexical_cast<string>(masked_ip),
+            g_SYNqueues[masked_ip]);
+    }
+
+    // set up the ip mask
+    g_ipmask = (numThreads - 1) << 15;
+    MYLOGINFO("g_ipmask = " << g_ipmask);
 
 	/* now we can set our callback function */
-//	pcap_loop(handle, num_packets, got_packet, myseckey);
 	pcap_loop(handle, 0, got_packet, NULL);
 
 	/* cleanup */
