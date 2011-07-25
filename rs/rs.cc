@@ -306,9 +306,10 @@ struct sniff_tcp {
         u_short th_urp;                 /* urgent pointer */
 };
 
-//#define MYLOG(x) LOG4CXX_INFO(g_logger, __FILE__ << ":" << __LINE__ << ": " << x)
 #define MYLOG(x) LOG4CXX_INFO(g_logger, x)
+#define MYLOGWARN(x) LOG4CXX_WARN(g_logger, x)
 #define MYLOGINFO(x) LOG4CXX_INFO(g_logger, x)
+#define MYLOGDEBUG(x) LOG4CXX_DEBUG(g_logger, x)
 
 #define CURVE25519_KEYSIZE (32)
 
@@ -392,12 +393,14 @@ typedef enum  {
 class ClientState_t {
 public:
     ClientState_t()
-        : _state(CS_ST_PENDING), _pktcount(0), _lastSeen(time(NULL)) {}
+        : _state(CS_ST_PENDING), _pktcount(0),
+          _lastSeen(time(NULL)), _regTime(0) {}
 
     u_char _curvepubkey[CURVE25519_KEYSIZE];
     client_state_t _state;
-    u_short _pktcount;
-    time_t _lastSeen;
+    u_short _pktcount; // for registration purpose
+    time_t _lastSeen; // time of last SYN packet seen
+    time_t _regTime; // time when registration succeeds
 };
 
 
@@ -499,10 +502,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 		return;
 	}
 
-	// /* print source and destination IP addresses */
-	// printf("       From: %s\n", inet_ntoa(ip->ip_src));
-	// printf("         To: %s\n", inet_ntoa(ip->ip_dst));
-
     bail_require_msg(ip->ip_p == IPPROTO_TCP, "getting non-TCP packets");
 	
 	/*
@@ -528,6 +527,7 @@ bail:
     return;
 }
 
+/* XXX/TODO: currently not re-entrant */
 static void
 notifyProxy(const uint32_t& src_ip,
             const u_char *kdf_data,
@@ -590,6 +590,13 @@ collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
     while (cit != clients.end()) {
         const shared_ptr<ClientState_t>& cs = cit->second;
         if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + 60))) {
+#ifdef DOLOGGING
+            const uint32_t ip = cit->first;
+            char tmp[INET_ADDRSTRLEN];
+            MYLOGINFO("  remove client "
+                      << inet_ntop(AF_INET, &ip, tmp, INET_ADDRSTRLEN)
+                      << " (" << ip << ")");
+#endif
             clients.erase(cit++);
         }
         else {
@@ -609,6 +616,7 @@ handleSynPackets(const string& threadname,
      */
     map<uint32_t, shared_ptr<ClientState_t> > clients;
     time_t lastGarbageCollection = time(NULL);
+    char addrstr[INET_ADDRSTRLEN];
 
     assert (threadname.length() < 16);
     assert (0 == prctl(PR_SET_NAME, threadname.c_str(), 0,0,0));
@@ -616,7 +624,7 @@ handleSynPackets(const string& threadname,
     MYLOG("thread " << threadname);
 
     while (true) {
-        const time_t now = time(NULL);
+        time_t now = time(NULL);
         if (now > (lastGarbageCollection + 30)) { // collect garbage every 30 seconds
             lastGarbageCollection = now;
             collectGarbage(clients, now);
@@ -626,7 +634,7 @@ handleSynPackets(const string& threadname,
         if (!synpackets->get_with_timeout(
                 g_garbagecollectioninterval, synpkt))
         {
-            MYLOG("no packet -> timedout");
+            MYLOGWARN("no packet -> timedout");
             continue;
         }
         // put it in the appropriate table entry
@@ -639,15 +647,18 @@ handleSynPackets(const string& threadname,
             cs = make_shared<ClientState_t>();
             // put it into the map
             clients[ip] = cs;
-            struct in_addr tmp;
-            tmp.s_addr = ip;
-//            log << " new pending client ip: " << inet_ntoa(tmp) << endl;
-//            log << "new map size: " << clients.size() << endl;
+#if 0
+            MYLOGINFO("  new pending client "
+                      << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                      << " (" << ip << ")");
+            MYLOGINFO("new map size: " << clients.size());
+#endif
         }
 
         ///// at this point, cs is a valid entry in the map /////
 
-        cs->_lastSeen = time(NULL);
+        now = time(NULL);
+        cs->_lastSeen = now;
 
         // increment first
         cs->_pktcount += 1;
@@ -659,11 +670,6 @@ handleSynPackets(const string& threadname,
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
             curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
 
-            if (g_verbose) {
-                if (!g_hardcode_sharedkey) {
-                    print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
-                }
-            }
             u_char kdf_data[(sizeof sharedkey) + 1];
             memcpy(kdf_data, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
             kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
@@ -680,23 +686,64 @@ handleSynPackets(const string& threadname,
             bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
                                g_register_str, REGISTER_STRLEN,
                                rsciphertext, sizeof rsciphertext));
+
+            if (g_verbose) {
+                print_hex_ascii_line("clientkey", cs->_curvepubkey,
+                                     sizeof cs->_curvepubkey, 0);
+                if (!g_hardcode_sharedkey) {
+                    print_hex_ascii_line("sharedkey", sharedkey,
+                                         sizeof sharedkey, 0);
+                }
+                print_hex_ascii_line("cipherkey", cipherkey,
+                                     sizeof cipherkey, 0);
+                print_hex_ascii_line("cipheriv ", cipheriv,
+                                     sizeof cipheriv, 0);
+                print_hex_ascii_line("expect esignal", rsciphertext,
+                                     sizeof rsciphertext, 0);
+                print_hex_ascii_line("actual esignal", synpkt->_tcp_seq,
+                                     sizeof synpkt->_tcp_seq, 0);
+            }
+
+            // reset pkt count
+            cs->_pktcount = 0;
+
             /* if g_dont_cmp_ciphertext is true, then we just accept
              * no matter what.
              */
             if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
-                MYLOGINFO("   ciphertext matched (or not compared)! notifying proxy about client");
-                cs->_state = CS_ST_REGISTERED;
-                // reset pkt count
-                cs->_pktcount = 0;
+                cs->_regTime = now;
 
+#if 0
+                char timestr[30];
+                MYLOGINFO("   ciphertext matched (or not compared)! client "
+                          << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                          << " (" << ip << ") (re)registered at time "
+                          << ctime_r(&(cs->_regTime), timestr));
+#endif
+
+                /// client might be already currently registered
+
+                /// if so, dont need to notify dr
+                if (cs->_state != CS_ST_REGISTERED) {
+                    notifyDR(ip);
+                }
+
+                // but always notify sp because we assume client is using new key materials
                 notifyProxy(ip, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
-                notifyDR(ip);
+
+                cs->_state = CS_ST_REGISTERED;
             }
             else {
-                MYLOGINFO("   ciphertext does not match");
-                // remove cs from map
-                clients.erase(ip);
-                MYLOGINFO("   client removed from map -> new map size: " << clients.size());
+#if 0
+                MYLOGDEBUG("   ciphertext does not match");
+#endif
+                // remove cs from map if client is not currently registered
+                if (cs->_state != CS_ST_REGISTERED) {
+                    clients.erase(ip);
+#if 0
+                    MYLOGDEBUG("   client removed from map -> new map size: " << clients.size());
+#endif
+                }
             }
         }
 bail:
@@ -822,7 +869,7 @@ int main(int argc, char **argv)
     }
 
     if (port > 0) {
-        filter_exp += " port ";
+        filter_exp += " and port ";
         filter_exp += lexical_cast<string>(port);
     }
 
