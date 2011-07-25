@@ -15,6 +15,7 @@
 #include <openssl/rand.h>
 #include <arpa/inet.h>
 #include <assert.h>
+#include <ctype.h>
 #include "openssl/ssl.h"
 #include "openssl/err.h"
 #include "curve25519-20050915/curve25519.h"
@@ -119,6 +120,65 @@ struct tcpheader {
   }                                                                     \
   while (0)
 
+/*
+ * print data in rows of 16 bytes: offset   hex   ascii
+ *
+ * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
+ */
+void
+print_hex_ascii_line(const char *header /* optional */,
+                     const unsigned char *payload, int len, int offset)
+{
+
+  int i;
+  int gap;
+  const unsigned char *ch;
+
+  if (header) {
+    printf("%s:\n", header);
+  }
+  /* offset */
+  printf("%05d   ", offset);
+
+  /* hex */
+  ch = payload;
+  for(i = 0; i < len; i++) {
+    printf("%02x", *ch);
+    ch++;
+    /* print extra space after 8th byte for visual aid */
+    if (((i + 1) % 4) == 0)
+      printf(" ");
+  }
+  /* print space to handle line less than 8 bytes */
+  if (len < 8)
+    printf(" ");
+
+  /* fill hex gap with spaces if not full line */
+  if (len < 16) {
+    gap = 16 - len;
+    for (i = 0; i < gap; i++) {
+      printf("   ");
+    }
+  }
+  printf("   ");
+
+  /* ascii (if printable) */
+  ch = payload;
+  for(i = 0; i < len; i++) {
+    if (isprint(*ch))
+      printf("%c", *ch);
+    else
+      printf(".");
+    ch++;
+    if (((i + 1) % 4) == 0)
+      printf(" ");
+  }
+
+  printf("\n");
+
+  return;
+}
+
 void gensecretkey(unsigned char secret[CURVE25519_KEYSIZE])
 {
   int i = 0;
@@ -140,12 +200,12 @@ void computepublickey(unsigned char pub[CURVE25519_KEYSIZE], const unsigned char
 }
 
 int
-getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
+getciphertext(const u_char *sharedcurvekey,
               /* used for registering */
-              u_char rsciphertext[4],
+              u_char *rsciphertext /* [4] */,
               /* used to signal to proxy */
-              u_char proxysynciphertext[4],
-              u_char proxyackciphertext[4]
+              u_char *proxysynciphertext /*[4]*/,
+              u_char *proxyackciphertext /*[4]*/
     )
 {
   int err = 0;
@@ -162,7 +222,7 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   // data to derive cipher key/iv
   u_char kdf_data[CURVE25519_KEYSIZE + 1] = {0};
   // use the shared curve25519 key
-  memcpy(kdf_data, sharedcurvekey, sizeof sharedcurvekey);
+  memcpy(kdf_data, sharedcurvekey, CURVE25519_KEYSIZE);
 
 
   // the last byte is "1" to derive the aes key
@@ -173,6 +233,9 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
     cipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
     cipherkey, cipheriv);
   bail_require(keylen == cipher->key_len);
+
+  print_hex_ascii_line("cipherkey", cipherkey, sizeof cipherkey, 0);
+  print_hex_ascii_line("cipheriv ", cipheriv, sizeof cipheriv, 0);
 
   benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
@@ -189,8 +252,8 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   bail_require(1 == BIO_flush(benc)); // need to flush
 
   // read out the first 4 bytes of the regciphertext
-  retval = BIO_read(ciphertextbio, rsciphertext, sizeof rsciphertext);
-  bail_require(retval == sizeof rsciphertext);
+  retval = BIO_read(ciphertextbio, rsciphertext, 4);
+  bail_require(retval == 4);
 
   //////////////////////////
   // now get the cipher text for signalling the proxy and the expected
@@ -201,16 +264,16 @@ getciphertext(const u_char sharedcurvekey[CURVE25519_KEYSIZE],
   bail_require(1 == BIO_flush(benc));
 
   retval = BIO_read(ciphertextbio,
-                    proxysynciphertext, sizeof proxysynciphertext);
-  bail_require(retval == sizeof proxysynciphertext);
+                    proxysynciphertext, 4);
+  bail_require(retval == 4);
 
   retval = BIO_write(benc, ack, strlen(ack));
   bail_require(retval == strlen(ack));
   bail_require(1 == BIO_flush(benc));
 
   retval = BIO_read(ciphertextbio,
-                    proxyackciphertext, sizeof proxyackciphertext);
-  bail_require(retval == sizeof proxyackciphertext);
+                    proxyackciphertext, 4);
+  bail_require(retval == 4);
 
 
 bail:
@@ -255,12 +318,16 @@ int main(int argc, char *argv[])
   u_char sharedkey[CURVE25519_KEYSIZE] = {0};
   curve25519(sharedkey, myseckey, rspubkey);
 
+  print_hex_ascii_line("mypubkey ", mypubkey, sizeof mypubkey, 0);
+  print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
+
   u_char rsciphertext[4] = {0};
   u_char proxysynciphertext[4] = {0};
   u_char proxyackciphertext[4] = {0};
   bail_error(getciphertext(sharedkey, rsciphertext,
                            proxysynciphertext, proxyackciphertext));
 
+  print_hex_ascii_line("esignal", rsciphertext, sizeof rsciphertext, 0);
 
 
   /// handle the socket stuff
