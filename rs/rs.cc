@@ -240,6 +240,7 @@ using std::map;
 using boost::lexical_cast;
 using boost::shared_ptr;
 using boost::make_shared;
+using boost::posix_time::time_duration;
 
 using namespace log4cxx;
 
@@ -421,6 +422,9 @@ static uint32_t g_ipmask = 0;
 // map from masked IP address to the syn packet queue
 static map<uint32_t, shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > > g_SYNqueues;
 
+time_duration g_garbagecollectioninterval = boost::posix_time::seconds(30); // hardcode 30 (seconds) for now
+
+
 int
 encrypt(const EVP_CIPHER *cipher,
         const u_char cipherkey[EVP_MAX_KEY_LENGTH],
@@ -592,7 +596,7 @@ collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
             ++cit;
         }
     }
-    MYLOGINFO("starting garbage collection");
+    MYLOGINFO("done garbage collection");
     return;
 }
 
@@ -618,8 +622,11 @@ handleSynPackets(const string& threadname,
             collectGarbage(clients, now);
         }
 
-        shared_ptr<SynPacket_t> synpkt = synpackets->get();
-        if (synpkt == NULL) {
+        shared_ptr<SynPacket_t> synpkt;
+        if (!synpackets->get_with_timeout(
+                g_garbagecollectioninterval, synpkt))
+        {
+            MYLOG("no packet -> timedout");
             continue;
         }
         // put it in the appropriate table entry
