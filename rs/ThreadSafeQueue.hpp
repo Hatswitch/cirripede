@@ -4,6 +4,7 @@
 
 #include <boost/thread/recursive_mutex.hpp>
 #include <boost/thread.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <queue>
 
 template<typename T>
@@ -15,6 +16,12 @@ public:
 
     /* this will block if the queue is empty */
     T get();
+
+    /* return true if a valid item has been copied into "item", return
+     * false otherwise.
+     */
+    bool get_with_timeout(boost::posix_time::time_duration const &rel_time,
+                          T& item);
 
 private:
     std::deque<T> _queue;
@@ -50,6 +57,33 @@ ThreadSafeQueue<T>::get()
     T item = _queue.front();
     _queue.pop_front();
     return item;
+}
+
+template<typename T>
+bool
+ThreadSafeQueue<T>::get_with_timeout(boost::posix_time::time_duration const &rel_time,
+                                     T& item)
+{
+    boost::unique_lock<boost::mutex> lock(_mutex);
+    if (_queue.empty()) {
+        if (! _not_empty.timed_wait(lock, rel_time)) {
+            // timed out
+            return false;
+        }
+        // not timed out -> make sure queue is not empty (boost says
+        // timed_wait might return "spuriously"
+        assert(!_queue.empty());
+        // falls through
+    }
+
+    // this is safe---it's using the assignment operator = to copy
+    // values of rhs object into existing object of lhs. (otoh, "T&
+    // item = _queue.front()" would simply make item a reference to
+    // the object on rhs, and would invalidate item after
+    // _queue.pop_front().)
+    item = _queue.front();
+    _queue.pop_front();
+    return true;
 }
 
 #endif // THREADSAFEQUEUE_HPP
