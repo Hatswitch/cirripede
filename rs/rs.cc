@@ -197,6 +197,7 @@
 #define APP_COPYRIGHT	"Copyright (c) 2005 The Tcpdump Group"
 #define APP_DISCLAIMER	"THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
 
+#include <signal.h>
 #include <pcap.h>
 #include <stdio.h>
 #include <string.h>
@@ -218,6 +219,7 @@
 #include "ThreadSafeQueue.hpp"
 #include <boost/make_shared.hpp>
 #include <map>
+#include <vector>
 #include "common.hpp"
 #include <log4cxx/logger.h>
 #include <log4cxx/basicconfigurator.h>
@@ -236,6 +238,7 @@ using std::string;
 using std::cout;
 using std::endl;
 using std::map;
+using std::vector;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
@@ -413,14 +416,16 @@ bool g_verbose = false;
 bool g_dont_cmp_ciphertext = false;
 bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
+static unsigned long long g_pktcount = 0;
+static vector<boost::thread *> g_handlerthreads;
+
+static bool g_terminate = false;
 
 static uint32_t g_ipmask = 0;
 
 #define ISPOWEROF2(x) (((x) != 0) && (((x) & ((x) - 1)) == 0))
 
 #define MASK_IP(ip) ((ip) & g_ipmask)
-
-//#define IP_TO_SYNQUEUE(ip) (g_SYNqueues[ MASK((ip)) ])
 
 // map from masked IP address to the syn packet queue
 static map<uint32_t, shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > > g_SYNqueues;
@@ -493,7 +498,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	int size_ip;
 	int size_tcp;
 	
-	
+    g_pktcount ++;
+
 	/* define/compute ip header offset */
 	ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
 	size_ip = IP_HL(ip)*4;
@@ -618,12 +624,28 @@ handleSynPackets(const string& threadname,
     time_t lastGarbageCollection = time(NULL);
     char addrstr[INET_ADDRSTRLEN];
 
+    // statistics
+    unsigned long long pktCount = 0; // num of pkts handled here
+    unsigned long long regCount = 0; // num of successful registrations
+    unsigned long long cryptoCount = 0; // num of times we need to do crypto ops
+
     assert (threadname.length() < 16);
     assert (0 == prctl(PR_SET_NAME, threadname.c_str(), 0,0,0));
 
-    MYLOG("thread " << threadname);
+    MYLOG("thread name " << threadname);
 
     while (true) {
+        // accessing g_terminate un-thread-safely, but this should be
+        // ok for now because we're assuming g_terminate is set to
+        // true only when we receive a signal, when experiment is
+        // done.
+        if (g_terminate) {
+            MYLOGINFO(threadname << ": pktCount = " << pktCount);
+            MYLOGINFO(threadname << ": regCount = " << regCount);
+            MYLOGINFO(threadname << ": cryptoCount = " << cryptoCount);
+            return;
+        }
+
         time_t now = time(NULL);
         if (now > (lastGarbageCollection + 30)) { // collect garbage every 30 seconds
             lastGarbageCollection = now;
@@ -637,6 +659,9 @@ handleSynPackets(const string& threadname,
             MYLOGWARN("no packet -> timedout");
             continue;
         }
+
+        pktCount++;
+
         // put it in the appropriate table entry
         const uint32_t ip = synpkt->_ip_src;
         shared_ptr<ClientState_t> cs;
@@ -687,6 +712,8 @@ handleSynPackets(const string& threadname,
                                g_register_str, REGISTER_STRLEN,
                                rsciphertext, sizeof rsciphertext));
 
+            cryptoCount ++;
+
             if (g_verbose) {
                 print_hex_ascii_line("clientkey", cs->_curvepubkey,
                                      sizeof cs->_curvepubkey, 0);
@@ -711,11 +738,13 @@ handleSynPackets(const string& threadname,
              * no matter what.
              */
             if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
+                regCount++;
+
                 cs->_regTime = now;
 
-#if 0
+#if 1
                 char timestr[30];
-                MYLOGINFO("   ciphertext matched (or not compared)! client "
+                MYLOGINFO("   ciphertext matched! client "
                           << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
                           << " (" << ip << ") (re)registered at time "
                           << ctime_r(&(cs->_regTime), timestr));
@@ -752,6 +781,25 @@ bail:
     return;
 }
 
+void signal_callback_handler(int signum)
+{
+    MYLOGINFO("Caught signal " << signum);
+    // Cleanup and close up stuff here
+
+    MYLOGINFO("waiting for handler threads to finish");
+    g_terminate = true;
+
+    for (u_int i = 0; i < g_handlerthreads.size(); ++i) {
+        g_handlerthreads[i]->join();
+    }
+
+    MYLOGINFO("g_pktcount = " << g_pktcount);
+    MYLOGINFO("exiting now");
+    
+    // Terminate program
+    exit(signum);
+}
+
 int main(int argc, char **argv)
 {
 
@@ -775,6 +823,12 @@ int main(int argc, char **argv)
     BIO *curvesecretfilebio = NULL;
     int numThreads = 1;
     AppenderList al;
+
+	printf("Revision: %s\n\n", rcsid);
+    for (int i = 0; i < argc; ++i) {
+        printf("%s ", argv[i]);
+    }
+    printf("\n\n");
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
@@ -857,6 +911,11 @@ int main(int argc, char **argv)
         }
     }
 
+    bail_require_msg(
+        (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
+        "'dont-compare-ciphertext' and 'hardcode-sharedkey' should be used "
+        "only for testing");
+
     bail_require_msg(ISPOWEROF2(numThreads), "numThreads must be power of 2");
 
     if (seckeypath && g_hardcode_sharedkey) {
@@ -937,9 +996,7 @@ int main(int argc, char **argv)
 		mask = 0;
 	}
 
-	/* print capture info */
-	printf("Device: %s\n", dev);
-	printf("Filter expression: %s\n", filter_exp.c_str());
+	printf("Filter expression: %s\n\n", filter_exp.c_str());
 
 	/* open capture device */
 	handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
@@ -979,10 +1036,12 @@ int main(int argc, char **argv)
         g_SYNqueues[masked_ip] = make_shared<ThreadSafeQueue<shared_ptr<SynPacket_t> > >();
 
         // XXX/leakin
-        new boost::thread(
+        g_handlerthreads.push_back(new boost::thread(
             handleSynPackets, "rs-" + boost::lexical_cast<string>(masked_ip),
-            g_SYNqueues[masked_ip]);
+            g_SYNqueues[masked_ip]));
     }
+
+    signal(SIGHUP, signal_callback_handler);
 
     // set up the ip mask
     g_ipmask = (numThreads - 1) << 15;
