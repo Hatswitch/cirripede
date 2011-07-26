@@ -197,6 +197,7 @@
 #define APP_COPYRIGHT	"Copyright (c) 2005 The Tcpdump Group"
 #define APP_DISCLAIMER	"THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
 
+#include <signal.h>
 #include <pcap.h>
 #include <stdio.h>
 #include <string.h>
@@ -369,12 +370,14 @@ typedef enum  {
 class ClientState_t {
 public:
     ClientState_t()
-        : _state(CS_ST_PENDING), _pktcount(0), _lastSeen(time(NULL)) {}
+        : _state(CS_ST_PENDING), _pktcount(0),
+          _lastSeen(time(NULL)), _regTime(0) {}
 
     u_char _curvepubkey[CURVE25519_KEYSIZE];
     client_state_t _state;
     u_short _pktcount;
     time_t _lastSeen;
+    time_t _regTime;
 };
 
 static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
@@ -386,6 +389,12 @@ bool g_verbose = false;
 bool g_dont_cmp_ciphertext = false;
 bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
+static bool g_terminate = false;
+
+static pcap_t *g_handle = NULL; /* packet capture handle */
+static unsigned long long g_pktCount = 0; // num of pkts handled here
+static unsigned long long g_regCount = 0; // num of successful registrations
+static unsigned long long g_cryptoCount = 0; // num of times we need to do crypto ops
 
 static int g_machdrlen = SIZE_ETHERNET;
 
@@ -462,6 +471,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 	int tcphdrlen;
     uint32_t clientipaddr;
     shared_ptr<ClientState_t> cs;
+    time_t now;
 
     ip = (struct sniff_ip*)(packet + g_machdrlen);
     const int iphdrlen = IP_HL(ip)*4;
@@ -478,6 +488,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     tcphdrlen = TH_OFF(tcp)*4;
     bail_require_msg(tcphdrlen >= 20, "* Invalid TCP header length");
     bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
+
+    g_pktCount ++;
 
     clientipaddr = ip->ip_src.s_addr;
 
@@ -497,7 +509,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     ///// at this point, cs is a valid entry in the map /////
 
     // update last seen
-    cs->_lastSeen = time(NULL);
+    now = time(NULL);
+    cs->_lastSeen = now;
 
     // increment first
     cs->_pktcount += 1;
@@ -531,23 +544,40 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
                            g_register_str, REGISTER_STRLEN,
                            rsciphertext, sizeof rsciphertext));
+
+        g_cryptoCount ++;
+
+        // reset pkt count
+        cs->_pktcount = 0;
+
         /* if g_dont_cmp_ciphertext is true, then we just accept
          * no matter what.
          */
         if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, &(tcp->th_seq), 4)) {
-            log << "\n   ciphertext matched (or not compared)! notifying proxy about client" << endl;
-            cs->_state = CS_ST_REGISTERED;
-            // reset pkt count
-            cs->_pktcount = 0;
+            g_regCount++;
 
+            cs->_regTime = now;
+
+//            log << "\n   ciphertext matched (or not compared)! notifying proxy about client" << endl;
+
+            /// client might be already currently registered
+
+            /// if so, dont need to notify dr
+            if (cs->_state != CS_ST_REGISTERED) {
+                notifyDR(clientipaddr);
+            }
+
+            // but always notify sp because we assume client is using new key materials
             notifyProxy(clientipaddr, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
-            notifyDR(clientipaddr);
+
+            cs->_state = CS_ST_REGISTERED;
         }
         else {
-            log << "\n   ciphertext does not match" << endl;
-            // remove cs from map
-            g_clients.erase(clientipaddr);
-            log << "   client removed from map -> new map size: " << g_clients.size() << endl;
+//            log << "\n   ciphertext does not match" << endl;
+            // remove cs from map if client is not currently registered
+            if (cs->_state != CS_ST_REGISTERED) {
+                g_clients.erase(clientipaddr);
+            }
         }
     }
 
@@ -620,18 +650,26 @@ collectGarbage()
     return;
 }
 
+void signal_callback_handler(int signum)
+{
+    printf("Caught signal %d\n", signum);
+    // Cleanup and close up stuff here
+
+    g_terminate = true;
+
+    pcap_breakloop(g_handle);
+}
+
 int main(int argc, char **argv)
 {
 
 	char *dev = NULL;			/* capture device name */
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
-	pcap_t *handle;				/* packet capture handle */
 
-	string filter_exp = "tcp ";		/* filter expression [3] */
+	string filter_exp = "tcp and (tcp[tcpflags] == tcp-syn)";		/* filter expression [3] */
 	struct bpf_program fp;			/* compiled filter program (expression) */
 	bpf_u_int32 mask;			/* subnet mask */
 	bpf_u_int32 net;			/* ip */
-	int num_packets = 10;			/* number of packets to capture */
     int opt;
     int long_index;
     u_short port = 0;
@@ -641,6 +679,12 @@ int main(int argc, char **argv)
     const char *drIP = NULL;
     u_short drCtlPort = 0;
     BIO *curvesecretfilebio = NULL;
+
+	printf("Revision: %s\n\n", rcsid);
+    for (int i = 0; i < argc; ++i) {
+        printf("%s ", argv[i]);
+    }
+    printf("\n\n");
 
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
@@ -718,6 +762,11 @@ int main(int argc, char **argv)
         }
     }
 
+    bail_require_msg(
+        (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
+        "'dont-compare-ciphertext' and 'hardcode-sharedkey' should be used "
+        "only for testing");
+
     if (seckeypath && g_hardcode_sharedkey) {
         fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
         exit(-1);
@@ -728,7 +777,7 @@ int main(int argc, char **argv)
     }
 
     if (port > 0) {
-        filter_exp += " port ";
+        filter_exp += " and port ";
         filter_exp += lexical_cast<string>(port);
     }
 
@@ -786,43 +835,44 @@ int main(int argc, char **argv)
 	}
 
 	/* print capture info */
-	printf("Device: %s\n", dev);
-	printf("Number of packets: %d\n", num_packets);
 	printf("Filter expression: %s\n", filter_exp.c_str());
 
 	/* open capture device */
-	handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
-	if (handle == NULL) {
+    /* 15 second timeout */
+	g_handle = pcap_open_live(dev, SNAP_LEN, 1, 15000, errbuf);
+	if (g_handle == NULL) {
 		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
 		exit(EXIT_FAILURE);
 	}
 
 	/* make sure we're capturing on an Ethernet device [2] */
-	if (pcap_datalink(handle) != DLT_EN10MB) {
+	if (pcap_datalink(g_handle) != DLT_EN10MB) {
 		fprintf(stderr, "%s is not an Ethernet\n", dev);
 		exit(EXIT_FAILURE);
 	}
 
     memset(&fp, 0, sizeof fp);
 	/* compile the filter expression */
-	if (pcap_compile(handle, &fp, filter_exp.c_str(), 0, net) == -1) {
+	if (pcap_compile(g_handle, &fp, filter_exp.c_str(), 0, net) == -1) {
 		fprintf(stderr, "Couldn't parse filter %s: %s\n",
-                filter_exp.c_str(), pcap_geterr(handle));
+                filter_exp.c_str(), pcap_geterr(g_handle));
 		exit(EXIT_FAILURE);
 	}
 
 	/* apply the compiled filter */
-	if (pcap_setfilter(handle, &fp) == -1) {
+	if (pcap_setfilter(g_handle, &fp) == -1) {
 		fprintf(stderr, "Couldn't install filter %s: %s\n",
-                filter_exp.c_str(), pcap_geterr(handle));
+                filter_exp.c_str(), pcap_geterr(g_handle));
 		exit(EXIT_FAILURE);
 	}
+
+    signal(SIGHUP, signal_callback_handler);
 
     const u_char *packet;		/* The actual packet */
     struct pcap_pkthdr header;
     time_t lastGarbageCollection;
     lastGarbageCollection = time(NULL);
-    while (true) {
+    while (!g_terminate) {
         {
             time_t now = time(NULL);
             if (now > (lastGarbageCollection + 30)) {
@@ -830,19 +880,22 @@ int main(int argc, char **argv)
                 collectGarbage();
             }
         }
-        packet = pcap_next(handle, &header);
-        got_packet(NULL, &header, packet);
+        packet = pcap_next(g_handle, &header);
+        if (packet) {
+            got_packet(NULL, &header, packet);
+        }
     }
 
 	/* cleanup */
 	pcap_freecode(&fp);
-	pcap_close(handle);
+	pcap_close(g_handle);
 
 	printf("\nCapture complete.\n");
 
 bail:
     openssl_safe_free(BIO, curvesecretfilebio);
-return 0;
+
+    return 0;
 }
 
 /*
