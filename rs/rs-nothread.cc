@@ -874,7 +874,7 @@ int main(int argc, char **argv)
     lastGarbageCollection = time(NULL);
     while (!g_terminate) {
         {
-            time_t now = time(NULL);
+            const time_t now = time(NULL);
             if (now > (lastGarbageCollection + 30)) {
                 lastGarbageCollection = now;
                 collectGarbage();
@@ -885,6 +885,10 @@ int main(int argc, char **argv)
             got_packet(NULL, &header, packet);
         }
     }
+
+    printf("pktCount = %llu\n", g_pktCount);
+    printf("regCount = %llu\n", g_regCount);
+    printf("cryptoCount = %llu\n", g_cryptoCount);
 
 	/* cleanup */
 	pcap_freecode(&fp);
