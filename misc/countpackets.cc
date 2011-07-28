@@ -20,6 +20,7 @@
 #include <iostream>
 #include <boost/make_shared.hpp>
 #include <map>
+#include <set>
 #include <openssl/rand.h>
 
 static const char rcsid[] =
@@ -29,6 +30,7 @@ using std::string;
 using std::cout;
 using std::endl;
 using std::map;
+using std::set;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
@@ -104,6 +106,7 @@ static unsigned long long int g_443synsize = 0;
 static unsigned long long int g_ipv4count = 0;
 static unsigned long long int g_ipv6count = 0;
 static bool g_count_ipv6 = true;
+static set<uint32_t> g_clientAddrs; /* src addrs on SYN pkts */
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -188,6 +191,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     if (tcp->th_flags == TH_SYN) {
         g_syncount ++;
         g_synsize += pktlen;
+        const struct sniff_ip *ip = (struct sniff_ip*)(packet + g_machdrlen);
+        g_clientAddrs.insert(ip->ip_src.s_addr);
     }
 
     if (ntohs(tcp->th_dport) == 443 || ntohs(tcp->th_sport) == 443) {
@@ -295,7 +300,8 @@ int main(int argc, char **argv)
            "  ipv6 count: %llu (%.3f M)\n",
            g_ipv4count, ((double)g_ipv4count) / (1000 * 1000),
            g_ipv6count, ((double)g_ipv6count) / (1000 * 1000));
-
+    printf("  num of uniq clients (ie, src addrs in SYN pkts): %zu\n",
+           g_clientAddrs.size());
     printf("\ntotal count and size of matched packets:\n"
            "SYN: %.3f M (%llu), %.3f GB (%llu bytes)\n"
            "443: %.3f M (%llu), %.3f GB (%llu bytes)\n"
