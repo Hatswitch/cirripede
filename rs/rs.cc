@@ -418,6 +418,7 @@ bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static unsigned long long g_pktcount = 0;
 static vector<boost::thread *> g_handlerthreads;
+static uint32_t g_validationInterval = 0;
 
 static bool g_terminate = false;
 
@@ -430,7 +431,7 @@ static uint32_t g_ipmask = 0;
 // map from masked IP address to the syn packet queue
 static map<uint32_t, shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > > g_SYNqueues;
 
-time_duration g_garbagecollectioninterval = boost::posix_time::seconds(30); // hardcode 30 (seconds) for now
+static time_duration g_garbagecollectioninterval = boost::posix_time::seconds(0);
 
 
 int
@@ -588,14 +589,17 @@ static const u_char g_register_str[] = "register";
 
 static void
 collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
-               const time_t& now)
+               const time_t& now,
+               unsigned long long& numClientsGarbageCollected)
 {
+    // dont reset numClientsGarbageCollected
+
     // loop thru the g_clients
     MYLOGINFO("starting garbage collection");
     map<uint32_t, shared_ptr<ClientState_t> >::iterator cit = clients.begin();
     while (cit != clients.end()) {
         const shared_ptr<ClientState_t>& cs = cit->second;
-        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + 60))) {
+        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + (int)g_validationInterval))) {
 #ifdef DOLOGGING
             const uint32_t ip = cit->first;
             char tmp[INET_ADDRSTRLEN];
@@ -604,6 +608,7 @@ collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
                       << " (" << ip << ")");
 #endif
             clients.erase(cit++);
+            numClientsGarbageCollected++;
         }
         else {
             ++cit;
@@ -623,11 +628,13 @@ handleSynPackets(const string& threadname,
     map<uint32_t, shared_ptr<ClientState_t> > clients;
     time_t lastGarbageCollection = time(NULL);
     char addrstr[INET_ADDRSTRLEN];
+    static const time_duration timeout = boost::posix_time::seconds(5); // 5 is arbitrary
 
     // statistics
     unsigned long long pktCount = 0; // num of pkts handled here
     unsigned long long regCount = 0; // num of successful registrations
     unsigned long long cryptoCount = 0; // num of times we need to do crypto ops
+    unsigned long long numClientsGarbageCollected = 0; // cumulative
 
     assert (threadname.length() < 16);
     assert (0 == prctl(PR_SET_NAME, threadname.c_str(), 0,0,0));
@@ -643,19 +650,18 @@ handleSynPackets(const string& threadname,
             MYLOGINFO(threadname << ": pktCount = " << pktCount);
             MYLOGINFO(threadname << ": regCount = " << regCount);
             MYLOGINFO(threadname << ": cryptoCount = " << cryptoCount);
+            MYLOGINFO(threadname << ": numClientsGarbageCollected = " << numClientsGarbageCollected);
             return;
         }
 
         time_t now = time(NULL);
-        if (now > (lastGarbageCollection + 30)) { // collect garbage every 30 seconds
+        if (now > (lastGarbageCollection + g_garbagecollectioninterval.total_seconds())) {
             lastGarbageCollection = now;
-            collectGarbage(clients, now);
+            collectGarbage(clients, now, numClientsGarbageCollected);
         }
 
         shared_ptr<SynPacket_t> synpkt;
-        if (!synpackets->get_with_timeout(
-                g_garbagecollectioninterval, synpkt))
-        {
+        if (!synpackets->get_with_timeout(timeout, synpkt)) {
             MYLOGWARN("no packet -> timedout");
             continue;
         }
@@ -842,6 +848,8 @@ int main(int argc, char **argv)
         {"drIP", required_argument, 0, 1008},
         {"drCtlPort", required_argument, 0, 1009},
         {"numThreads", required_argument, 0, 1010}, // should be power of 2
+        {"validationInterval", required_argument, 0, 1011}, // in seconds
+        {"garbageCollectionInterval", required_argument, 0, 1012}, // in seconds
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -904,12 +912,29 @@ int main(int argc, char **argv)
             numThreads = strtod(optarg, NULL);
             break;
 
+        case 1011:
+            g_validationInterval = strtod(optarg, NULL);
+            assert (g_validationInterval >= 60 && g_validationInterval <= 3600);
+            break;
+
+        case 1012:
+            g_garbagecollectioninterval = boost::posix_time::seconds(
+                strtod(optarg, NULL));
+            assert (g_garbagecollectioninterval.total_seconds() >= 60 &&
+                    g_garbagecollectioninterval.total_seconds() <= 3600);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
     }
+
+    bail_require_msg(g_validationInterval != 0,
+                     "must specify --validationInterval");
+    bail_require_msg(g_garbagecollectioninterval.total_seconds() != 0,
+                     "must specify --garbageCollectionInterval");
 
     bail_require_msg(
         (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
@@ -1046,6 +1071,8 @@ int main(int argc, char **argv)
     // set up the ip mask
     g_ipmask = (numThreads - 1) << 15;
     MYLOGINFO("g_ipmask = " << g_ipmask);
+    MYLOGINFO("g_validationInterval = " << g_validationInterval);
+    MYLOGINFO("g_garbagecollectioninterval = " << g_garbagecollectioninterval.total_seconds());
 
 	/* now we can set our callback function */
 	pcap_loop(handle, 0, got_packet, NULL);
@@ -1071,7 +1098,7 @@ print_app_usage(void)
 	printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
-           "          --drIP ... --drCtlPort ... \n"
+           "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compute-ciphertext]\n"
            "          [--device interface]\n", APP_NAME);

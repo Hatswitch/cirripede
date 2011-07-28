@@ -390,6 +390,8 @@ bool g_dont_cmp_ciphertext = false;
 bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static bool g_terminate = false;
+static uint32_t g_validationInterval = 0;
+static unsigned long long g_numClientsGarbageCollected = 0;
 
 static pcap_t *g_handle = NULL; /* packet capture handle */
 static unsigned long long g_pktCount = 0; // num of pkts handled here
@@ -633,20 +635,22 @@ bail:
 }
 
 static void
-collectGarbage()
+collectGarbage(const time_t& now)
 {
     // loop thru the g_clients
-    const time_t now = time(NULL);
+    printf("%s: starting garbage collection\n", ctime(&now));
     map<uint32_t, shared_ptr<ClientState_t> >::iterator cit = g_clients.begin();
     while (cit != g_clients.end()) {
         const shared_ptr<ClientState_t>& cs = cit->second;
-        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + 60))) {
+        if (cs->_state == CS_ST_PENDING && (now > (cs->_lastSeen + (int)g_validationInterval))) {
             g_clients.erase(cit++);
+            g_numClientsGarbageCollected ++;
         }
         else {
             ++cit;
         }
     }
+    printf("%s: done garbage collection\n", ctime(&now));
     return;
 }
 
@@ -679,6 +683,7 @@ int main(int argc, char **argv)
     const char *drIP = NULL;
     u_short drCtlPort = 0;
     BIO *curvesecretfilebio = NULL;
+    uint32_t garbagecollectioninterval = 0;
 
 	printf("Revision: %s\n\n", rcsid);
     for (int i = 0; i < argc; ++i) {
@@ -697,6 +702,8 @@ int main(int argc, char **argv)
         {"hardcode-sharedkey", required_argument, 0, 1007},
         {"drIP", required_argument, 0, 1008},
         {"drCtlPort", required_argument, 0, 1009},
+        {"validationInterval", required_argument, 0, 1010}, // in seconds
+        {"garbageCollectionInterval", required_argument, 0, 1011}, // in seconds
         {0, 0, 0, 0},
     };
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
@@ -755,12 +762,28 @@ int main(int argc, char **argv)
             drCtlPort = strtod(optarg, NULL);
             break;
 
+        case 1010:
+            g_validationInterval = strtod(optarg, NULL);
+            assert (g_validationInterval >= 60 && g_validationInterval <= 3600);
+            break;
+
+        case 1011:
+            garbagecollectioninterval = strtod(optarg, NULL);
+            assert (garbagecollectioninterval >= 60 &&
+                    garbagecollectioninterval <= 3600);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
     }
+
+    bail_require_msg(g_validationInterval != 0,
+                     "must specify --validationInterval");
+    bail_require_msg(garbagecollectioninterval != 0,
+                     "must specify --garbageCollectionInterval");
 
     bail_require_msg(
         (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
@@ -836,6 +859,8 @@ int main(int argc, char **argv)
 
 	/* print capture info */
 	printf("Filter expression: %s\n", filter_exp.c_str());
+    printf("g_validationInterval = %d\n", g_validationInterval);
+    printf("garbagecollectioninterval = %d\n", garbagecollectioninterval);
 
 	/* open capture device */
     /* 15 second timeout */
@@ -875,9 +900,9 @@ int main(int argc, char **argv)
     while (!g_terminate) {
         {
             const time_t now = time(NULL);
-            if (now > (lastGarbageCollection + 30)) {
+            if (now > (lastGarbageCollection + (int)garbagecollectioninterval)) {
                 lastGarbageCollection = now;
-                collectGarbage();
+                collectGarbage(now);
             }
         }
         packet = pcap_next(g_handle, &header);
@@ -889,6 +914,7 @@ int main(int argc, char **argv)
     printf("pktCount = %llu\n", g_pktCount);
     printf("regCount = %llu\n", g_regCount);
     printf("cryptoCount = %llu\n", g_cryptoCount);
+    printf("g_numClientsGarbageCollected = %llu\n", g_numClientsGarbageCollected);
 
 	/* cleanup */
 	pcap_freecode(&fp);
@@ -913,6 +939,7 @@ print_app_usage(void)
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --drIP ... --drCtlPort ... \n"
+           "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compare-ciphertext]\n"
            "          [--device interface]\n", APP_NAME);
