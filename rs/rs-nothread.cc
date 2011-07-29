@@ -297,7 +297,8 @@ struct sniff_tcp {
  */
 void
 print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset)
+                     const unsigned char *payload, int len, int offset,
+                     const bool hexonly=true)
 {
 
   int i;
@@ -330,6 +331,7 @@ print_hex_ascii_line(const char *header /* optional */,
       printf("   ");
     }
   }
+  if (!hexonly) {
   printf("   ");
 
   /* ascii (if printable) */
@@ -342,6 +344,7 @@ print_hex_ascii_line(const char *header /* optional */,
     ch++;
     if (((i + 1) % 4) == 0)
       printf(" ");
+  }
   }
 
   printf("\n");
@@ -459,10 +462,6 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 
 void
-print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset);
-
-void
 print_app_usage(void);
 
 void
@@ -474,6 +473,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     uint32_t clientipaddr;
     shared_ptr<ClientState_t> cs;
     time_t now;
+    char addrstr[INET_ADDRSTRLEN];
 
     ip = (struct sniff_ip*)(packet + g_machdrlen);
     const int iphdrlen = IP_HL(ip)*4;
@@ -560,7 +560,11 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
             cs->_regTime = now;
 
-//            log << "\n   ciphertext matched (or not compared)! notifying proxy about client" << endl;
+	    char timestr[30];
+            log << "   client "
+		<< inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
+		<< " (" << clientipaddr << ") (re)registered at time "
+		<< ctime_r(&(cs->_regTime), timestr);
 
             /// client might be already currently registered
 
@@ -892,6 +896,8 @@ int main(int argc, char **argv)
 	}
 
     signal(SIGHUP, signal_callback_handler);
+    signal(SIGINT, signal_callback_handler);
+    signal(SIGTERM, signal_callback_handler);
 
     const u_char *packet;		/* The actual packet */
     struct pcap_pkthdr header;
