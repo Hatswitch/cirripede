@@ -181,21 +181,21 @@
  * examples, is documented in the tcpdump man page under "expression."
  * Below are a few simple examples:
  *
- * Expression			Description
- * ----------			-----------
- * ip					Capture all IP packets.
- * tcp					Capture only TCP packets.
- * tcp port 80			Capture only TCP packets with a port equal to 80.
- * ip host 10.1.2.3		Capture all IP packets to or from host 10.1.2.3.
+ * Expression           Description
+ * ----------           -----------
+ * ip                   Capture all IP packets.
+ * tcp                  Capture only TCP packets.
+ * tcp port 80          Capture only TCP packets with a port equal to 80.
+ * ip host 10.1.2.3     Capture all IP packets to or from host 10.1.2.3.
  *
  ****************************************************************************
  *
  */
 
-#define APP_NAME		"sniffex"
-#define APP_DESC		"Sniffer example using libpcap"
-#define APP_COPYRIGHT	"Copyright (c) 2005 The Tcpdump Group"
-#define APP_DISCLAIMER	"THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
+#define APP_NAME        "sniffex"
+#define APP_DESC        "Sniffer example using libpcap"
+#define APP_COPYRIGHT   "Copyright (c) 2005 The Tcpdump Group"
+#define APP_DISCLAIMER  "THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
 
 #include <signal.h>
 #include <pcap.h>
@@ -256,7 +256,7 @@ static LoggerPtr g_logger = log4cxx::Logger::getRootLogger();
 #define SIZE_ETHERNET 14
 
 /* Ethernet addresses are 6 bytes */
-#define ETHER_ADDR_LEN	6
+#define ETHER_ADDR_LEN  6
 
 /* Ethernet header */
 struct sniff_ethernet {
@@ -326,53 +326,53 @@ print_hex_ascii_line(const char *header /* optional */,
                      const unsigned char *payload, int len, int offset)
 {
 
-  int i;
-  int gap;
-  const unsigned char *ch;
+    int i;
+    int gap;
+    const unsigned char *ch;
 
-  if (header) {
-    printf("%s:\n", header);
-  }
-  /* offset */
-  printf("%05d   ", offset);
-
-  /* hex */
-  ch = payload;
-  for(i = 0; i < len; i++) {
-    printf("%02x", *ch);
-    ch++;
-    /* print extra space after 8th byte for visual aid */
-    if (((i + 1) % 4) == 0)
-      printf(" ");
-  }
-  /* print space to handle line less than 8 bytes */
-  if (len < 8)
-    printf(" ");
-
-  /* fill hex gap with spaces if not full line */
-  if (len < 16) {
-    gap = 16 - len;
-    for (i = 0; i < gap; i++) {
-      printf("   ");
+    if (header) {
+        printf("%s:\n", header);
     }
-  }
-  printf("   ");
+    /* offset */
+    printf("%05d   ", offset);
 
-  /* ascii (if printable) */
-  ch = payload;
-  for(i = 0; i < len; i++) {
-    if (isprint(*ch))
-      printf("%c", *ch);
-    else
-      printf(".");
-    ch++;
-    if (((i + 1) % 4) == 0)
-      printf(" ");
-  }
+    /* hex */
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        printf("%02x", *ch);
+        ch++;
+        /* print extra space after 8th byte for visual aid */
+        if (((i + 1) % 4) == 0)
+            printf(" ");
+    }
+    /* print space to handle line less than 8 bytes */
+    if (len < 8)
+        printf(" ");
 
-  printf("\n");
+    /* fill hex gap with spaces if not full line */
+    if (len < 16) {
+        gap = 16 - len;
+        for (i = 0; i < gap; i++) {
+            printf("   ");
+        }
+    }
+    printf("   ");
 
-  return;
+    /* ascii (if printable) */
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        if (isprint(*ch))
+            printf("%c", *ch);
+        else
+            printf(".");
+        ch++;
+        if (((i + 1) % 4) == 0)
+            printf(" ");
+    }
+
+    printf("\n");
+
+    return;
 }
 
 
@@ -444,35 +444,35 @@ encrypt(const EVP_CIPHER *cipher,
         const int ciphertextlen
     )
 {
-  int err = 0;
-  int retval = 0;
-  BIO *ciphertextbio = NULL;
-  BIO *benc = NULL;
+    int err = 0;
+    int retval = 0;
+    BIO *ciphertextbio = NULL;
+    BIO *benc = NULL;
 
-  bail_require(ciphertextlen <= cleartextlen);
+    bail_require(ciphertextlen <= cleartextlen);
 
-  benc = BIO_new(BIO_f_cipher());
-  bail_null(benc);
+    benc = BIO_new(BIO_f_cipher());
+    bail_null(benc);
 
-  BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
+    BIO_set_cipher(benc, cipher, cipherkey, cipheriv, 1);
 
-  ciphertextbio = BIO_new(BIO_s_mem());
-  bail_null(ciphertextbio);
+    ciphertextbio = BIO_new(BIO_s_mem());
+    bail_null(ciphertextbio);
 
-  bail_require(BIO_push(benc, ciphertextbio) == benc);
+    bail_require(BIO_push(benc, ciphertextbio) == benc);
 
-  retval = BIO_write(benc, cleartext, cleartextlen);
-  bail_require(retval == cleartextlen);
-  bail_require(1 == BIO_flush(benc)); // need to flush
+    retval = BIO_write(benc, cleartext, cleartextlen);
+    bail_require(retval == cleartextlen);
+    bail_require(1 == BIO_flush(benc)); // need to flush
 
-  // read out the regciphertext
-  retval = BIO_read(ciphertextbio, ciphertext, ciphertextlen);
-  bail_require(retval == ciphertextlen);
+    // read out the regciphertext
+    retval = BIO_read(ciphertextbio, ciphertext, ciphertextlen);
+    bail_require(retval == ciphertextlen);
 
 bail:
-  openssl_safe_free(BIO, benc);
-  openssl_safe_free(BIO, ciphertextbio);
-  return err;
+    openssl_safe_free(BIO, benc);
+    openssl_safe_free(BIO, ciphertextbio);
+    return err;
 }
 
 void
@@ -492,36 +492,36 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
 
-	/* declare pointers to packet headers */
-	const struct sniff_ip *ip;              /* The IP header */
-	const struct sniff_tcp *tcp;            /* The TCP header */
+    /* declare pointers to packet headers */
+    const struct sniff_ip *ip;              /* The IP header */
+    const struct sniff_tcp *tcp;            /* The TCP header */
     shared_ptr<SynPacket_t> synpkt;
-	int size_ip;
-	int size_tcp;
-	
+    int size_ip;
+    int size_tcp;
+    
     g_pktcount ++;
 
-	/* define/compute ip header offset */
-	ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
-	size_ip = IP_HL(ip)*4;
-	if (size_ip < 20) {
-		printf("   * Invalid IP header length: %u bytes\n", size_ip);
-		return;
-	}
+    /* define/compute ip header offset */
+    ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
+    size_ip = IP_HL(ip)*4;
+    if (size_ip < 20) {
+        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        return;
+    }
 
     bail_require_msg(ip->ip_p == IPPROTO_TCP, "getting non-TCP packets");
-	
-	/*
-	 *  OK, this packet is TCP.
-	 */
-	
-	/* define/compute tcp header offset */
-	tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
-	size_tcp = TH_OFF(tcp)*4;
-	if (size_tcp < 20) {
-		printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
-		return;
-	}
+    
+    /*
+     *  OK, this packet is TCP.
+     */
+    
+    /* define/compute tcp header offset */
+    tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
+    size_tcp = TH_OFF(tcp)*4;
+    if (size_tcp < 20) {
+        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+        return;
+    }
 
     bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
 
@@ -809,14 +809,14 @@ void signal_callback_handler(int signum)
 int main(int argc, char **argv)
 {
 
-	char *dev = NULL;			/* capture device name */
-	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
-	pcap_t *handle;				/* packet capture handle */
+    char *dev = NULL;           /* capture device name */
+    char errbuf[PCAP_ERRBUF_SIZE];      /* error buffer */
+    pcap_t *handle;             /* packet capture handle */
 
-	string filter_exp = "tcp and (tcp[tcpflags] == tcp-syn)"; /* filter expression [3] */
-	struct bpf_program fp;			/* compiled filter program (expression) */
-	bpf_u_int32 mask;			/* subnet mask */
-	bpf_u_int32 net;			/* ip */
+    string filter_exp = "tcp and (tcp[tcpflags] == tcp-syn)"; /* filter expression [3] */
+    struct bpf_program fp;          /* compiled filter program (expression) */
+    bpf_u_int32 mask;           /* subnet mask */
+    bpf_u_int32 net;            /* ip */
     int opt;
     int long_index;
     u_short port = 0;
@@ -830,7 +830,7 @@ int main(int argc, char **argv)
     int numThreads = 1;
     AppenderList al;
 
-	printf("Revision: %s\n\n", rcsid);
+    printf("Revision: %s\n\n", rcsid);
     for (int i = 0; i < argc; ++i) {
         printf("%s ", argv[i]);
     }
@@ -1003,53 +1003,53 @@ int main(int argc, char **argv)
     g_drAddr.sin_addr.s_addr=inet_addr(drIP);
     g_drAddr.sin_port=htons(drCtlPort);
 
-	if (dev == NULL) {
-		/* find a capture device if not specified on command-line */
-		dev = pcap_lookupdev(errbuf);
-		if (dev == NULL) {
-			fprintf(stderr, "Couldn't find default device: %s\n",
-			    errbuf);
-			exit(EXIT_FAILURE);
-		}
-	}
-	
-	/* get network number and mask associated with capture device */
-	if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
-		fprintf(stderr, "Couldn't get netmask for device %s: %s\n",
-		    dev, errbuf);
-		net = 0;
-		mask = 0;
-	}
+    if (dev == NULL) {
+        /* find a capture device if not specified on command-line */
+        dev = pcap_lookupdev(errbuf);
+        if (dev == NULL) {
+            fprintf(stderr, "Couldn't find default device: %s\n",
+                    errbuf);
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    /* get network number and mask associated with capture device */
+    if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
+        fprintf(stderr, "Couldn't get netmask for device %s: %s\n",
+                dev, errbuf);
+        net = 0;
+        mask = 0;
+    }
 
-	printf("Filter expression: %s\n\n", filter_exp.c_str());
+    printf("Filter expression: %s\n\n", filter_exp.c_str());
 
-	/* open capture device */
-	handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
-	if (handle == NULL) {
-		fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
-		exit(EXIT_FAILURE);
-	}
+    /* open capture device */
+    handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
+    if (handle == NULL) {
+        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+        exit(EXIT_FAILURE);
+    }
 
-	/* make sure we're capturing on an Ethernet device [2] */
-	if (pcap_datalink(handle) != DLT_EN10MB) {
-		fprintf(stderr, "%s is not an Ethernet\n", dev);
-		exit(EXIT_FAILURE);
-	}
+    /* make sure we're capturing on an Ethernet device [2] */
+    if (pcap_datalink(handle) != DLT_EN10MB) {
+        fprintf(stderr, "%s is not an Ethernet\n", dev);
+        exit(EXIT_FAILURE);
+    }
 
     memset(&fp, 0, sizeof fp);
-	/* compile the filter expression */
-	if (pcap_compile(handle, &fp, filter_exp.c_str(), 0, net) == -1) {
-		fprintf(stderr, "Couldn't parse filter %s: %s\n",
+    /* compile the filter expression */
+    if (pcap_compile(handle, &fp, filter_exp.c_str(), 0, net) == -1) {
+        fprintf(stderr, "Couldn't parse filter %s: %s\n",
                 filter_exp.c_str(), pcap_geterr(handle));
-		exit(EXIT_FAILURE);
-	}
+        exit(EXIT_FAILURE);
+    }
 
-	/* apply the compiled filter */
-	if (pcap_setfilter(handle, &fp) == -1) {
-		fprintf(stderr, "Couldn't install filter %s: %s\n",
+    /* apply the compiled filter */
+    if (pcap_setfilter(handle, &fp) == -1) {
+        fprintf(stderr, "Couldn't install filter %s: %s\n",
                 filter_exp.c_str(), pcap_geterr(handle));
-		exit(EXIT_FAILURE);
-	}
+        exit(EXIT_FAILURE);
+    }
 
     for (int i = 0; i < numThreads; ++i) {
         // create a clients table for each thread
@@ -1062,8 +1062,8 @@ int main(int argc, char **argv)
 
         // XXX/leakin
         g_handlerthreads.push_back(new boost::thread(
-            handleSynPackets, "rs-" + boost::lexical_cast<string>(masked_ip),
-            g_SYNqueues[masked_ip]));
+                                       handleSynPackets, "rs-" + boost::lexical_cast<string>(masked_ip),
+                                       g_SYNqueues[masked_ip]));
     }
 
     signal(SIGHUP, signal_callback_handler);
@@ -1074,18 +1074,18 @@ int main(int argc, char **argv)
     MYLOGINFO("g_validationInterval = " << g_validationInterval);
     MYLOGINFO("g_garbagecollectioninterval = " << g_garbagecollectioninterval.total_seconds());
 
-	/* now we can set our callback function */
-	pcap_loop(handle, 0, got_packet, NULL);
+    /* now we can set our callback function */
+    pcap_loop(handle, 0, got_packet, NULL);
 
-	/* cleanup */
-	pcap_freecode(&fp);
-	pcap_close(handle);
+    /* cleanup */
+    pcap_freecode(&fp);
+    pcap_close(handle);
 
-	printf("\nCapture complete.\n");
+    printf("\nCapture complete.\n");
 
 bail:
     openssl_safe_free(BIO, curvesecretfilebio);
-return 0;
+    return 0;
 }
 
 /*
@@ -1095,14 +1095,14 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
+    printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compute-ciphertext]\n"
            "          [--device interface]\n", APP_NAME);
-	printf("\n");
+    printf("\n");
 
-return;
+    return;
 }
