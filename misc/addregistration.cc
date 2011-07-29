@@ -32,6 +32,9 @@ extern "C" {
 #include "curve25519-20050915/curve25519.h"
 }
 
+static const char rcsid[] =
+    "$Id$";
+
 using std::string;
 using std::cout;
 using std::endl;
