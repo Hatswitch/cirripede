@@ -411,6 +411,12 @@ int main(int argc, char **argv)
         {0, 0, 0, 0},
     };
 
+    printf("Revision: %s\n\n", rcsid);
+    for (int i = 0; i < argc; ++i) {
+        printf("%s ", argv[i]);
+    }
+    printf("\n\n");
+
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
     {
         switch (opt) {
