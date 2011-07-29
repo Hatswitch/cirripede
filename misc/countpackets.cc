@@ -107,6 +107,7 @@ static unsigned long long int g_ipv4count = 0;
 static unsigned long long int g_ipv6count = 0;
 static bool g_count_ipv6 = true;
 static set<uint32_t> g_clientAddrs; /* src addrs on SYN pkts */
+static map<uint32_t, uint32_t> g_clientToSYNCount; /* from ip addr to # of SYNs */
 
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
@@ -193,6 +194,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         g_synsize += pktlen;
         const struct sniff_ip *ip = (struct sniff_ip*)(packet + g_machdrlen);
         g_clientAddrs.insert(ip->ip_src.s_addr);
+	g_clientToSYNCount[ip->ip_src.s_addr] += 1;
     }
 
     if (ntohs(tcp->th_dport) == 443 || ntohs(tcp->th_sport) == 443) {
@@ -302,6 +304,18 @@ int main(int argc, char **argv)
            g_ipv6count, ((double)g_ipv6count) / (1000 * 1000));
     printf("  num of uniq clients (ie, src addrs in SYN pkts): %zu\n",
            g_clientAddrs.size());
+
+    unsigned long long enoughSYNsForReg = 0;
+    for (map<uint32_t, uint32_t>::iterator cit = g_clientToSYNCount.begin();
+	 cit != g_clientToSYNCount.end(); ++cit)
+    {
+        if (cit->second >= 9) {
+            enoughSYNsForReg++;
+	}
+    }
+    printf("  num of uniq clients with enough SYN pkts to complete registraion: %llu\n",
+           enoughSYNsForReg);
+
     printf("\ntotal count and size of matched packets:\n"
            "SYN: %.3f M (%llu), %.3f GB (%llu bytes)\n"
            "443: %.3f M (%llu), %.3f GB (%llu bytes)\n"
