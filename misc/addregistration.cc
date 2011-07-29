@@ -105,11 +105,14 @@ struct sniff_tcp {
 
 #define log cout << __FILE__ << ":" << __LINE__ << ": "
 
-static int count = 0;
+static unsigned long long g_count = 0;
 static u_char g_rspubkey[CURVE25519_KEYSIZE] = {0};
 static pcap_dumper_t* g_dumperhandle = NULL;
 static int g_machdrlen = SIZE_ETHERNET;
 static bool g_verbose = false;
+static unsigned long long g_completeSignalCount = 0; // number of
+						     // whole/complete
+						     // signals added
 
 struct Client {
     u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey, then 4 bytes
@@ -133,7 +136,8 @@ map<uint32_t, Client_t> g_ip2Clients;
  */
 void
 print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset)
+                     const unsigned char *payload, int len, int offset,
+                     const bool hexonly=true)
 {
 
     int i;
@@ -166,6 +170,8 @@ print_hex_ascii_line(const char *header /* optional */,
             printf("   ");
         }
     }
+
+    if (!hexonly) {
     printf("   ");
 
     /* ascii (if printable) */
@@ -178,6 +184,7 @@ print_hex_ascii_line(const char *header /* optional */,
         ch++;
         if (((i + 1) % 4) == 0)
             printf(" ");
+    }
     }
 
     printf("\n");
@@ -295,6 +302,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
     const u_char ip_version = (*(packet + g_machdrlen)) >> 4;
 
+    g_count ++;
+
     if (ip_version != 4) {
         goto bail;
     }
@@ -341,13 +350,16 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         }
 
         if (client._offset == sizeof (client._signal)) {
-            bail_null(inet_ntop(AF_INET, &ip->ip_src, ipaddrstr, sizeof ipaddrstr));
             if (g_verbose) {
-                printf("client %s completed signal\n", ipaddrstr);
+                bail_null(inet_ntop(AF_INET, &ip->ip_src, ipaddrstr, sizeof ipaddrstr));
+                printf("client %s (%u) completed signal\n", ipaddrstr, ip->ip_src.s_addr);
+                print_hex_ascii_line("pubkey+signal", client._signal, sizeof client._signal, 0);
+                printf("\n");
             }
             // removing client from map, so it will be considered a
             // fresh client later
             g_ip2Clients.erase(ip->ip_src.s_addr);
+	    g_completeSignalCount ++;
         }
     }
     else {
@@ -369,12 +381,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
                                  proxysynciphertext, proxyackciphertext));
 
         COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
-
-        if (g_verbose) {
-            print_hex_ascii_line("pubkey", client._signal, CURVE25519_KEYSIZE, 0);
-            print_hex_ascii_line("shakey", sharedkey, CURVE25519_KEYSIZE, 0);
-            print_hex_ascii_line("signal", client._signal, sizeof client._signal, 0);
-        }
 
         g_ip2Clients[ip->ip_src.s_addr] = client;
     }
@@ -483,7 +489,8 @@ int main(int argc, char **argv)
     pcap_loop(handle, 0, got_packet, NULL);
 
     /* cleanup */
-    printf("\nCapture complete. Packet count: %d\n", count);
+    printf("\nTotal packet count: %llu\n", g_count);
+    printf("\nComplete signals count: %llu\n", g_completeSignalCount);
 
 bail:
     openssl_safe_free(BIO, rs_curve_pubkey_filebio);
