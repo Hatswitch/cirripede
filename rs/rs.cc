@@ -662,7 +662,6 @@ handleSynPackets(const string& threadname,
 
         shared_ptr<SynPacket_t> synpkt;
         if (!synpackets->get_with_timeout(timeout, synpkt)) {
-            MYLOGWARN("no packet -> timedout");
             continue;
         }
 
@@ -745,16 +744,13 @@ handleSynPackets(const string& threadname,
              */
             if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
                 regCount++;
-
                 cs->_regTime = now;
 
-#if 1
                 char timestr[30];
-                MYLOGINFO("   ciphertext matched! client "
+                MYLOGINFO("   client "
                           << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
                           << " (" << ip << ") (re)registered at time "
                           << ctime_r(&(cs->_regTime), timestr));
-#endif
 
                 /// client might be already currently registered
 
