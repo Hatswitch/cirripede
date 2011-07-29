@@ -323,7 +323,8 @@ struct sniff_tcp {
  */
 void
 print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset)
+                     const unsigned char *payload, int len, int offset,
+                     const bool hexonly=true)
 {
 
     int i;
@@ -356,6 +357,8 @@ print_hex_ascii_line(const char *header /* optional */,
             printf("   ");
         }
     }
+
+    if (!hexonly) {
     printf("   ");
 
     /* ascii (if printable) */
@@ -368,6 +371,7 @@ print_hex_ascii_line(const char *header /* optional */,
         ch++;
         if (((i + 1) % 4) == 0)
             printf(" ");
+    }
     }
 
     printf("\n");
@@ -479,10 +483,6 @@ void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 
 void
-print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset);
-
-void
 print_app_usage(void);
 
 /*
@@ -526,6 +526,15 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
 
     synpkt = make_shared<SynPacket_t>(ip->ip_src.s_addr, (u_char*)&(tcp->th_seq));
+
+#if 0
+    uint32_t _ip;
+    _ip = ip->ip_src.s_addr;
+    char addrstr[30];
+    MYLOGINFO("  got pkt from client "
+	      << inet_ntop(AF_INET, &_ip, addrstr, INET_ADDRSTRLEN)
+	      << " (" << _ip << ")");
+#endif
 
     // put it into the appropriate queue
     g_SYNqueues[ MASK_IP(ip->ip_src.s_addr) ]->put(synpkt);
@@ -1063,6 +1072,8 @@ int main(int argc, char **argv)
     }
 
     signal(SIGHUP, signal_callback_handler);
+    signal(SIGINT, signal_callback_handler);
+    signal(SIGTERM, signal_callback_handler);
 
     // set up the ip mask
     g_ipmask = (numThreads - 1) << 15;
