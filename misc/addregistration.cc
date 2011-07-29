@@ -240,9 +240,6 @@ getciphertext(const u_char *sharedcurvekey /* [CURVE25519_KEYSIZE] */,
         cipherkey, cipheriv);
     bail_require(keylen == cipher->key_len);
 
-    print_hex_ascii_line("cipherkey", cipherkey, sizeof cipherkey, 0);
-    print_hex_ascii_line("cipheriv ", cipheriv, sizeof cipheriv, 0);
-
     benc = BIO_new(BIO_f_cipher());
     bail_null(benc);
 
