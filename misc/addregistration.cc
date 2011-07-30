@@ -114,6 +114,12 @@ static unsigned long long g_completeSignalCount = 0; // number of
 						     // whole/complete
 						     // signals added
 
+// use one single key (and thus encrypted signals etc) for all clients
+// to improve performance significantly
+static bool g_useOneKey = false;
+static u_char g_signal[CURVE25519_KEYSIZE + 4] = {0};
+
+
 struct Client {
     u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey, then 4 bytes
                                             // for the encryption of
@@ -346,20 +352,27 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     if (Common::inMap(g_ip2Clients, ip->ip_src.s_addr)) {
         Client_t& client = g_ip2Clients[ip->ip_src.s_addr];
         if (client._offset < sizeof (client._signal)) {
-            COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+            if (g_useOneKey) {
+                COPY_INTO_ISN(&(tcp->th_seq), g_signal, client._offset);
+            }
+            else {
+                COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+            }
         }
 
         if (client._offset == sizeof (client._signal)) {
             if (g_verbose) {
                 bail_null(inet_ntop(AF_INET, &ip->ip_src, ipaddrstr, sizeof ipaddrstr));
                 printf("client %s (%u) completed signal\n", ipaddrstr, ip->ip_src.s_addr);
-                print_hex_ascii_line("pubkey+signal", client._signal, sizeof client._signal, 0);
+                print_hex_ascii_line("pubkey+signal",
+                                     g_useOneKey ? g_signal : client._signal,
+                                     sizeof client._signal, 0);
                 printf("\n");
             }
             // removing client from map, so it will be considered a
             // fresh client later
             g_ip2Clients.erase(ip->ip_src.s_addr);
-	    g_completeSignalCount ++;
+            g_completeSignalCount ++;
         }
     }
     else {
@@ -368,19 +381,25 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
         Client_t client;
         client._offset = 0;
-        u_char seckey[CURVE25519_KEYSIZE];
-        gensecretkey(seckey);
-        computepublickey(client._signal, seckey);
-        u_char sharedkey[CURVE25519_KEYSIZE];
-        curve25519(sharedkey, seckey, g_rspubkey);
 
-        u_char proxysynciphertext[4] = {0};
-        u_char proxyackciphertext[4] = {0};
+        if (g_useOneKey) {
+            COPY_INTO_ISN(&(tcp->th_seq), g_signal, client._offset);
+        }
+        else {
+            u_char seckey[CURVE25519_KEYSIZE];
+            gensecretkey(seckey);
+            computepublickey(client._signal, seckey);
+            u_char sharedkey[CURVE25519_KEYSIZE];
+            curve25519(sharedkey, seckey, g_rspubkey);
 
-        bail_error(getciphertext(sharedkey, client._signal + CURVE25519_KEYSIZE,
-                                 proxysynciphertext, proxyackciphertext));
+            u_char proxysynciphertext[4] = {0};
+            u_char proxyackciphertext[4] = {0};
 
-        COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+            bail_error(getciphertext(sharedkey, client._signal + CURVE25519_KEYSIZE,
+                                     proxysynciphertext, proxyackciphertext));
+
+            COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+        }
 
         g_ip2Clients[ip->ip_src.s_addr] = client;
     }
@@ -410,6 +429,7 @@ int main(int argc, char **argv)
         {"rspubkeypath", required_argument, 0, 1002},
         {"outpcapfilepath", required_argument, 0, 1003},
         {"verbose", no_argument, 0, 1005},
+        {"use-one-key", no_argument, 0, 1006},
         {0, 0, 0, 0},
     };
 
@@ -453,6 +473,10 @@ int main(int argc, char **argv)
             g_verbose = true;
             break;
 
+        case 1006:
+            g_useOneKey = true;
+            break;
+
         }
     }
 
@@ -491,6 +515,20 @@ int main(int argc, char **argv)
     else {
         fprintf(stderr, "pcap datalink type %d not supported\n", linktype);
         exit(EXIT_FAILURE);
+    }
+
+    if (g_useOneKey) {
+        assert(sizeof g_signal == sizeof ((Client_t*)NULL)->_signal);
+        u_char seckey[CURVE25519_KEYSIZE];
+        u_char sharedkey[CURVE25519_KEYSIZE];
+        u_char dummy1[4];
+        u_char dummy2[4];
+
+        gensecretkey(seckey);
+        computepublickey(g_signal, seckey);
+        curve25519(sharedkey, seckey, g_rspubkey);
+        bail_error(getciphertext(sharedkey, g_signal + CURVE25519_KEYSIZE,
+                                 dummy1, dummy2));
     }
 
     /* now we can set our callback function */
