@@ -409,7 +409,6 @@ int main(int argc, char **argv)
         {"inpcapfilepath", required_argument, 0, 1001},
         {"rspubkeypath", required_argument, 0, 1002},
         {"outpcapfilepath", required_argument, 0, 1003},
-        {"no-mac", no_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
         {0, 0, 0, 0},
     };
@@ -450,10 +449,6 @@ int main(int argc, char **argv)
             outpcapfilepath = optarg;
             break;
 
-        case 1004:
-            g_machdrlen = 0;
-            break;
-
         case 1005:
             g_verbose = true;
             break;
@@ -484,6 +479,19 @@ int main(int argc, char **argv)
     /* open output pcap file */
     g_dumperhandle = pcap_dump_open(handle, outpcapfilepath);
     assert(g_dumperhandle != NULL);
+
+    int linktype;
+    linktype = pcap_datalink(handle);
+    if (linktype == DLT_EN10MB) {
+        g_machdrlen = SIZE_ETHERNET;
+    }
+    else if (linktype == DLT_RAW) {
+        g_machdrlen = 0;
+    }
+    else {
+        fprintf(stderr, "pcap datalink type %d not supported\n", linktype);
+        exit(EXIT_FAILURE);
+    }
 
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);

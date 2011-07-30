@@ -226,7 +226,6 @@ int main(int argc, char **argv)
 
     struct option long_options[] = {
         {"pcapfilepath", required_argument, 0, 1001},
-        {"no-mac", no_argument, 0, 1003},
         {"no-ipv6", no_argument, 0, 1004},
         {0, 0, 0, 0},
     };
@@ -247,10 +246,6 @@ int main(int argc, char **argv)
 
         case 1001:
             pcapfilepath = optarg;
-            break;
-
-        case 1003:
-            g_machdrlen = 0;
             break;
 
         case 1004:
@@ -286,12 +281,24 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    int linktype;
+    linktype = pcap_datalink(handle);
+    if (linktype == DLT_EN10MB) {
+        g_machdrlen = SIZE_ETHERNET;
+    }
+    else if (linktype == DLT_RAW) {
+        g_machdrlen = 0;
+    }
+    else {
+        fprintf(stderr, "pcap datalink type %d not supported\n", linktype);
+        exit(EXIT_FAILURE);
+    }
+
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
 
     printf("Id: %s\n", rcsid);
     printf("pcapfilepath: %s\n", pcapfilepath);
-    printf("no-mac: %s\n", g_machdrlen == 0 ? "true" : "false");
     printf("no-ipv6: %s\n", g_count_ipv6 ? "false" : "true");
     printf("filter: \"%s\"\n", filter_exp.c_str());
     printf("\nnumber of bpf-filter-matched packets (though might count packets "
