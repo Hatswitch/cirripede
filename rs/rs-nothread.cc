@@ -219,6 +219,7 @@
 #include <boost/make_shared.hpp>
 #include <map>
 #include "common.hpp"
+#include <math.h>
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -376,7 +377,7 @@ public:
         : _state(CS_ST_PENDING), _pktcount(0),
           _lastSeen(time(NULL)), _regTime(0) {}
 
-    u_char _curvepubkey[CURVE25519_KEYSIZE];
+    u_char _signal[CURVE25519_KEYSIZE + 4];
     client_state_t _state;
     u_short _pktcount;
     time_t _lastSeen;
@@ -394,6 +395,8 @@ bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static bool g_terminate = false;
 static uint32_t g_validationInterval = 0;
+static uint32_t g_bytesPerISN = 0;
+static uint32_t g_numRequiredPkts = 0;
 static unsigned long long g_numClientsGarbageCollected = 0;
 
 static pcap_t *g_handle = NULL; /* packet capture handle */
@@ -517,13 +520,13 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     // increment first
     cs->_pktcount += 1;
 
-    if (cs->_pktcount < 9) {
-        // need more pkts
-        memcpy(cs->_curvepubkey + ((cs->_pktcount - 1) * 4), &(tcp->th_seq), 4);
-    }
-    else {
+    memcpy(cs->_signal + ((cs->_pktcount - 1) * g_bytesPerISN),
+           &(tcp->th_seq), g_bytesPerISN);
+
+    if (cs->_pktcount == g_numRequiredPkts) {
+        // we have enough packets --> detect signal
         u_char sharedkey[CURVE25519_KEYSIZE];
-        curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
+        curve25519(sharedkey, g_myseckey, cs->_signal);
 
         if (g_verbose) {
             if (!g_hardcode_sharedkey) {
@@ -555,16 +558,18 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         /* if g_dont_cmp_ciphertext is true, then we just accept
          * no matter what.
          */
-        if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, &(tcp->th_seq), 4)) {
+        if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
             g_regCount++;
 
             cs->_regTime = now;
 
-	    char timestr[30];
-            log << "   client "
-		<< inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
-		<< " (" << clientipaddr << ") (re)registered at time "
-		<< ctime_r(&(cs->_regTime), timestr);
+            if (g_verbose) {
+                char timestr[30];
+                log << "   client "
+                    << inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
+                    << " (" << clientipaddr << ") (re)registered at time "
+                    << ctime_r(&(cs->_regTime), timestr);
+            }
 
             /// client might be already currently registered
 
@@ -708,8 +713,10 @@ int main(int argc, char **argv)
         {"drCtlPort", required_argument, 0, 1009},
         {"validationInterval", required_argument, 0, 1010}, // in seconds
         {"garbageCollectionInterval", required_argument, 0, 1011}, // in seconds
+        {"bytesPerISN", required_argument, 0, 1012}, // either 3 or 4
         {0, 0, 0, 0},
     };
+
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
     {
         switch (opt) {
@@ -777,12 +784,21 @@ int main(int argc, char **argv)
                     garbagecollectioninterval <= 3600);
             break;
 
+        case 1012:
+            g_bytesPerISN = strtod(optarg, NULL);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
     }
+
+    bail_require_msg(g_bytesPerISN == 3 || g_bytesPerISN == 4,
+                     "must specify --bytesPerISN with 3 or 4");
+    g_numRequiredPkts = (uint8_t)ceil(((double)(CURVE25519_KEYSIZE + 4)) /
+                                      g_bytesPerISN);
 
     bail_require_msg(g_validationInterval != 0,
                      "must specify --validationInterval");
@@ -918,9 +934,9 @@ int main(int argc, char **argv)
     }
 
     printf("pktCount = %llu\n", g_pktCount);
-    printf("regCount = %llu\n", g_regCount);
     printf("cryptoCount = %llu\n", g_cryptoCount);
     printf("g_numClientsGarbageCollected = %llu\n", g_numClientsGarbageCollected);
+    printf("regCount = %llu\n", g_regCount);
 
 	/* cleanup */
 	pcap_freecode(&fp);
@@ -945,6 +961,7 @@ print_app_usage(void)
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --drIP ... --drCtlPort ... \n"
+           "          --bytesPerISN ... \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compare-ciphertext]\n"

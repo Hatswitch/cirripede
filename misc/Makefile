@@ -8,7 +8,7 @@ measureSYNInterarrival: measureSYNInterarrival.cc common.hpp
 
 addregistration: addregistration.cc common.hpp \
 	curve25519-20050915/curve25519.a curve25519-20050915/curve25519.h
-	g++ -g -Wall -lpcap -lcrypto -o addregistration addregistration.cc \
+	g++ -g -Wall -lm -lpcap -lcrypto -o addregistration addregistration.cc \
 		curve25519-20050915/curve25519.a && \
 		rm -f curve25519-20050915/curve25519.h curve25519-20050915/x86cpuid.out \
 		curve25519-20050915/curve25519.impl curve25519-20050915/curve25519.impl.check \

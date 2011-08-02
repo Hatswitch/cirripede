@@ -403,7 +403,7 @@ public:
         : _state(CS_ST_PENDING), _pktcount(0),
           _lastSeen(time(NULL)), _regTime(0) {}
 
-    u_char _curvepubkey[CURVE25519_KEYSIZE];
+    u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey + ciphertext
     client_state_t _state;
     u_short _pktcount; // for registration purpose
     time_t _lastSeen; // time of last SYN packet seen
@@ -422,8 +422,9 @@ bool g_hardcode_sharedkey = false;
 static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static unsigned long long g_pktcount = 0;
 static vector<boost::thread *> g_handlerthreads;
-static uint32_t g_validationInterval = 0;
-
+static uint16_t g_validationInterval = 0;
+static uint32_t g_bytesPerISN = 0;
+static uint32_t g_numRequiredPkts = 0;
 static bool g_terminate = false;
 
 static uint32_t g_ipmask = 0;
@@ -604,7 +605,7 @@ collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
     // dont reset numClientsGarbageCollected
 
     // loop thru the g_clients
-    MYLOGINFO("starting garbage collection");
+//    MYLOGINFO("starting garbage collection");
     map<uint32_t, shared_ptr<ClientState_t> >::iterator cit = clients.begin();
     while (cit != clients.end()) {
         const shared_ptr<ClientState_t>& cs = cit->second;
@@ -623,7 +624,7 @@ collectGarbage(map<uint32_t, shared_ptr<ClientState_t> >& clients,
             ++cit;
         }
     }
-    MYLOGINFO("done garbage collection");
+//    MYLOGINFO("done garbage collection");
     return;
 }
 
@@ -657,9 +658,9 @@ handleSynPackets(const string& threadname,
         // done.
         if (g_terminate) {
             MYLOGINFO(threadname << ": pktCount = " << pktCount);
-            MYLOGINFO(threadname << ": regCount = " << regCount);
             MYLOGINFO(threadname << ": cryptoCount = " << cryptoCount);
             MYLOGINFO(threadname << ": numClientsGarbageCollected = " << numClientsGarbageCollected);
+            MYLOGINFO(threadname << ": regCount = " << regCount);
             return;
         }
 
@@ -686,12 +687,12 @@ handleSynPackets(const string& threadname,
             cs = make_shared<ClientState_t>();
             // put it into the map
             clients[ip] = cs;
-#if 0
-            MYLOGINFO("  new pending client "
-                      << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
-                      << " (" << ip << ")");
-            MYLOGINFO("new map size: " << clients.size());
-#endif
+            if (g_verbose) {
+                MYLOGINFO("  new pending client "
+                          << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                          << " (" << ip << ")");
+                MYLOGINFO("new map size: " << clients.size());
+            }
         }
 
         ///// at this point, cs is a valid entry in the map /////
@@ -701,13 +702,14 @@ handleSynPackets(const string& threadname,
 
         // increment first
         cs->_pktcount += 1;
-        if (cs->_pktcount < 9) {
-            // need more pkts
-            memcpy(cs->_curvepubkey + ((cs->_pktcount - 1) * 4), synpkt->_tcp_seq, 4);
-        }
-        else {
+
+        memcpy(cs->_signal + ((cs->_pktcount - 1) * g_bytesPerISN),
+               synpkt->_tcp_seq, g_bytesPerISN);
+
+        if (cs->_pktcount == g_numRequiredPkts) {
+            // we have enough packets --> detect signal
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
-            curve25519(sharedkey, g_myseckey, cs->_curvepubkey);
+            curve25519(sharedkey, g_myseckey, cs->_signal);
 
             u_char kdf_data[(sizeof sharedkey) + 1];
             memcpy(kdf_data, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
@@ -729,8 +731,8 @@ handleSynPackets(const string& threadname,
             cryptoCount ++;
 
             if (g_verbose) {
-                print_hex_ascii_line("clientkey", cs->_curvepubkey,
-                                     sizeof cs->_curvepubkey, 0);
+                print_hex_ascii_line("clientkey", cs->_signal,
+                                     CURVE25519_KEYSIZE, 0);
                 if (!g_hardcode_sharedkey) {
                     print_hex_ascii_line("sharedkey", sharedkey,
                                          sizeof sharedkey, 0);
@@ -741,8 +743,8 @@ handleSynPackets(const string& threadname,
                                      sizeof cipheriv, 0);
                 print_hex_ascii_line("expect esignal", rsciphertext,
                                      sizeof rsciphertext, 0);
-                print_hex_ascii_line("actual esignal", synpkt->_tcp_seq,
-                                     sizeof synpkt->_tcp_seq, 0);
+                print_hex_ascii_line("actual esignal", cs->_signal + CURVE25519_KEYSIZE,
+                                     4, 0);
             }
 
             // reset pkt count
@@ -751,15 +753,17 @@ handleSynPackets(const string& threadname,
             /* if g_dont_cmp_ciphertext is true, then we just accept
              * no matter what.
              */
-            if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, synpkt->_tcp_seq, 4)) {
+            if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
                 regCount++;
                 cs->_regTime = now;
 
-                char timestr[30];
-                MYLOGINFO("   client "
-                          << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
-                          << " (" << ip << ") (re)registered at time "
-                          << ctime_r(&(cs->_regTime), timestr));
+                if (g_verbose) {
+                    char timestr[30];
+                    MYLOGINFO("   client "
+                              << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                              << " (" << ip << ") (re)registered at time "
+                              << ctime_r(&(cs->_regTime), timestr));
+                }
 
                 /// client might be already currently registered
 
@@ -855,8 +859,10 @@ int main(int argc, char **argv)
         {"numThreads", required_argument, 0, 1010}, // should be power of 2
         {"validationInterval", required_argument, 0, 1011}, // in seconds
         {"garbageCollectionInterval", required_argument, 0, 1012}, // in seconds
+        {"bytesPerISN", required_argument, 0, 1013}, // either 3 or 4
         {0, 0, 0, 0},
     };
+
     while ((opt = getopt_long(argc, argv, "", long_options, &long_index)) != -1)
     {
         switch (opt) {
@@ -929,12 +935,25 @@ int main(int argc, char **argv)
                     g_garbagecollectioninterval.total_seconds() <= 3600);
             break;
 
+        case 1013:
+            g_bytesPerISN = strtod(optarg, NULL);
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
     }
+
+    bail_require_msg(g_bytesPerISN == 3 || g_bytesPerISN == 4,
+                     "must specify --bytesPerISN with 3 or 4");
+    g_numRequiredPkts = (uint8_t)ceil(((double)(CURVE25519_KEYSIZE + 4)) /
+                                      g_bytesPerISN);
+
+    bail_require_msg(drIP != NULL, "must specify --drIP");
+    bail_require_msg(drCtlPort > 0, "must specify --drCtlPort");
+    bail_require_msg(dev != NULL, "must specify --device");
 
     bail_require_msg(g_validationInterval != 0,
                      "must specify --validationInterval");
@@ -1007,16 +1026,6 @@ int main(int argc, char **argv)
     g_drAddr.sin_family = AF_INET;
     g_drAddr.sin_addr.s_addr=inet_addr(drIP);
     g_drAddr.sin_port=htons(drCtlPort);
-
-    if (dev == NULL) {
-        /* find a capture device if not specified on command-line */
-        dev = pcap_lookupdev(errbuf);
-        if (dev == NULL) {
-            fprintf(stderr, "Couldn't find default device: %s\n",
-                    errbuf);
-            exit(EXIT_FAILURE);
-        }
-    }
     
     /* get network number and mask associated with capture device */
     if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
@@ -1080,6 +1089,8 @@ int main(int argc, char **argv)
     MYLOGINFO("g_ipmask = " << g_ipmask);
     MYLOGINFO("g_validationInterval = " << g_validationInterval);
     MYLOGINFO("g_garbagecollectioninterval = " << g_garbagecollectioninterval.total_seconds());
+    MYLOGINFO("g_bytesPerISN = " << g_bytesPerISN);
+    MYLOGINFO("g_numRequiredPkts = " << g_numRequiredPkts);
 
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
@@ -1105,6 +1116,8 @@ print_app_usage(void)
     printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
            "          [--port <port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
+           "          --drIP ... --drCtlPort ... \n"
+           "          --bytesPerISN ... \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          [--hardcode-sharedkey <one char>]\n"
            "          [--dont-compute-ciphertext]\n"

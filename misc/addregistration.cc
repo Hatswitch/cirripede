@@ -27,6 +27,7 @@
 #include <map>
 #include "common.hpp"
 #include <openssl/rand.h>
+#include <math.h>
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -114,11 +115,13 @@ static unsigned long long g_completeSignalCount = 0; // number of
 						     // whole/complete
 						     // signals added
 
+static uint32_t g_bytesPerISN = 0;
+static uint32_t g_numRequiredPkts = 0;
+
 // use one single key (and thus encrypted signals etc) for all clients
 // to improve performance significantly
 static bool g_useOneKey = false;
 static u_char g_signal[CURVE25519_KEYSIZE + 4] = {0};
-
 
 struct Client {
     u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey, then 4 bytes
@@ -222,17 +225,17 @@ void computepublickey(unsigned char pub[CURVE25519_KEYSIZE],
 int
 getciphertext(const u_char *sharedcurvekey /* [CURVE25519_KEYSIZE] */,
               /* used for registering */
-              u_char *rsciphertext /*[4]*/,
+              u_char *rsciphertext /*[4]*/
               /* used to signal to proxy */
+#if 0
               u_char *proxysynciphertext /*[4]*/,
               u_char *proxyackciphertext /*[4]*/
+#endif
     )
 {
     int err = 0;
     int retval = 0;
     static const char str[] = "register";
-    static const char syn[] = "syn";
-    static const char ack[] = "ack";
     BIO *ciphertextbio = NULL;
     BIO *benc = NULL;
     /// generate key and iv for cipher
@@ -271,6 +274,7 @@ getciphertext(const u_char *sharedcurvekey /* [CURVE25519_KEYSIZE] */,
     retval = BIO_read(ciphertextbio, rsciphertext, 4);
     bail_require(retval == 4);
 
+#if 0
     //////////////////////////
     // now get the cipher text for signalling the proxy and the expected
     // response
@@ -290,6 +294,7 @@ getciphertext(const u_char *sharedcurvekey /* [CURVE25519_KEYSIZE] */,
     retval = BIO_read(ciphertextbio,
                       proxyackciphertext, 4);
     bail_require(retval == 4);
+#endif
 
 bail:
     openssl_safe_free(BIO, benc);
@@ -331,32 +336,23 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         goto bail;
     }
 
-#if 0
-    // this does 3 bytes at a time
-#define COPY_INTO_ISN(tcpISNPtr, signal, offset)                        \
+#define COPY_INTO_ISN(tcpISNPtr, signal, offset, numBytesPerISN)        \
     do {                                                                \
-        memcpy((u_char*)(tcpISNPtr) + 1, (signal) + (offset), 3);       \
-        (offset) += 3;                                                  \
+        memcpy((u_char*)(tcpISNPtr) + 0, (signal) + (offset), (numBytesPerISN)); \
+        (offset) += (numBytesPerISN);                                   \
     }                                                                   \
     while (0)
-#else
-    // this one does 4 bytes at a time
-#define COPY_INTO_ISN(tcpISNPtr, signal, offset)                        \
-    do {                                                                \
-        memcpy((u_char*)(tcpISNPtr) + 0, (signal) + (offset), 4);       \
-        (offset) += 4;                                                  \
-    }                                                                   \
-    while (0)
-#endif
 
     if (Common::inMap(g_ip2Clients, ip->ip_src.s_addr)) {
         Client_t& client = g_ip2Clients[ip->ip_src.s_addr];
         if (client._offset < sizeof (client._signal)) {
             if (g_useOneKey) {
-                COPY_INTO_ISN(&(tcp->th_seq), g_signal, client._offset);
+                COPY_INTO_ISN(&(tcp->th_seq), g_signal,
+                              client._offset, g_bytesPerISN);
             }
             else {
-                COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+                COPY_INTO_ISN(&(tcp->th_seq), client._signal,
+                              client._offset, g_bytesPerISN);
             }
         }
 
@@ -383,7 +379,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         client._offset = 0;
 
         if (g_useOneKey) {
-            COPY_INTO_ISN(&(tcp->th_seq), g_signal, client._offset);
+            COPY_INTO_ISN(&(tcp->th_seq), g_signal,
+                          client._offset, g_bytesPerISN);
         }
         else {
             u_char seckey[CURVE25519_KEYSIZE];
@@ -392,13 +389,13 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             u_char sharedkey[CURVE25519_KEYSIZE];
             curve25519(sharedkey, seckey, g_rspubkey);
 
-            u_char proxysynciphertext[4] = {0};
-            u_char proxyackciphertext[4] = {0};
+            // u_char proxysynciphertext[4] = {0};
+            // u_char proxyackciphertext[4] = {0};
 
-            bail_error(getciphertext(sharedkey, client._signal + CURVE25519_KEYSIZE,
-                                     proxysynciphertext, proxyackciphertext));
+            bail_error(getciphertext(sharedkey, client._signal + CURVE25519_KEYSIZE));
 
-            COPY_INTO_ISN(&(tcp->th_seq), client._signal, client._offset);
+            COPY_INTO_ISN(&(tcp->th_seq), client._signal,
+                          client._offset, g_bytesPerISN);
         }
 
         g_ip2Clients[ip->ip_src.s_addr] = client;
@@ -430,6 +427,7 @@ int main(int argc, char **argv)
         {"outpcapfilepath", required_argument, 0, 1003},
         {"verbose", no_argument, 0, 1005},
         {"use-one-key", no_argument, 0, 1006},
+        {"bytesPerISN", required_argument, 0, 1007}, // either 3 or 4
         {0, 0, 0, 0},
     };
 
@@ -477,8 +475,17 @@ int main(int argc, char **argv)
             g_useOneKey = true;
             break;
 
+        case 1007:
+            g_bytesPerISN = strtod(optarg, NULL);
+            break;
+
         }
     }
+
+    bail_require_msg(g_bytesPerISN == 3 || g_bytesPerISN == 4,
+                     "must specify --bytesPerISN with 3 or 4");
+    g_numRequiredPkts = (uint8_t)ceil(((double)(CURVE25519_KEYSIZE + 4)) /
+                                      g_bytesPerISN);
 
     assert(inpcapfilepath != NULL);
     assert(outpcapfilepath != NULL);
@@ -521,14 +528,11 @@ int main(int argc, char **argv)
         assert(sizeof g_signal == sizeof ((Client_t*)NULL)->_signal);
         u_char seckey[CURVE25519_KEYSIZE];
         u_char sharedkey[CURVE25519_KEYSIZE];
-        u_char dummy1[4];
-        u_char dummy2[4];
 
         gensecretkey(seckey);
         computepublickey(g_signal, seckey);
         curve25519(sharedkey, seckey, g_rspubkey);
-        bail_error(getciphertext(sharedkey, g_signal + CURVE25519_KEYSIZE,
-                                 dummy1, dummy2));
+        bail_error(getciphertext(sharedkey, g_signal + CURVE25519_KEYSIZE));
     }
 
     /* now we can set our callback function */
