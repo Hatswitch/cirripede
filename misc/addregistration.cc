@@ -410,11 +410,12 @@ bail:
 
 int main(int argc, char **argv)
 {
+    int err = 1;
     const char *rspubkeypath = NULL;
     const char *inpcapfilepath = NULL;
     const char *outpcapfilepath = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];      /* error buffer */
-    pcap_t *handle;             /* packet capture handle */
+    pcap_t *handle = NULL;             /* packet capture handle */
 
     int opt;
     int long_index;
@@ -545,9 +546,15 @@ int main(int argc, char **argv)
     printf("\nTotal packet count: %llu\n", g_count);
     printf("\nComplete signals count: %llu\n", g_completeSignalCount);
 
+    err = 0;
+
 bail:
     openssl_safe_free(BIO, rs_curve_pubkey_filebio);
-    pcap_close(handle);
-    pcap_dump_close(g_dumperhandle);
-    return 0;
+    if (handle) {
+        pcap_close(handle);
+    }
+    if (g_dumperhandle) {
+        pcap_dump_close(g_dumperhandle);
+    }
+    return err;
 }
