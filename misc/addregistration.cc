@@ -479,6 +479,9 @@ int main(int argc, char **argv)
             g_bytesPerISN = strtod(optarg, NULL);
             break;
 
+        default:
+            exit(-1);
+            break;
         }
     }
 
