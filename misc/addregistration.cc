@@ -25,6 +25,7 @@
 #include <iostream>
 #include <boost/make_shared.hpp>
 #include <map>
+#include <set>
 #include "common.hpp"
 #include <openssl/rand.h>
 #include <math.h>
@@ -40,6 +41,7 @@ using std::string;
 using std::cout;
 using std::endl;
 using std::map;
+using std::set;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
@@ -122,6 +124,7 @@ static uint32_t g_numRequiredPkts = 0;
 // to improve performance significantly
 static bool g_useOneKey = false;
 static u_char g_signal[CURVE25519_KEYSIZE + 4] = {0};
+static bool g_oncePerClient = false;
 
 struct Client {
     u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey, then 4 bytes
@@ -310,6 +313,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     int iphdrlen;
     int tcphdrlen;
     static char ipaddrstr[INET_ADDRSTRLEN];
+    static set<uint32_t> clientsHaveReg; // clients who have registered
 
     const u_char ip_version = (*(packet + g_machdrlen)) >> 4;
 
@@ -333,6 +337,12 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     tcp = (struct sniff_tcp*)(packet + g_machdrlen + iphdrlen);
     tcphdrlen = TH_OFF(tcp)*4;
     if (tcphdrlen < 20 || tcp->th_flags != TH_SYN) {
+        goto bail;
+    }
+
+    if (g_oncePerClient &&
+        clientsHaveReg.end() != clientsHaveReg.find(ip->ip_src.s_addr)) {
+        // client has registered once -> skip
         goto bail;
     }
 
@@ -369,6 +379,10 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             // fresh client later
             g_ip2Clients.erase(ip->ip_src.s_addr);
             g_completeSignalCount ++;
+            if (g_oncePerClient) {
+                // remember that we have registered this client
+                clientsHaveReg.insert(ip->ip_src.s_addr);
+            }
         }
     }
     else {
@@ -429,6 +443,7 @@ int main(int argc, char **argv)
         {"verbose", no_argument, 0, 1005},
         {"use-one-key", no_argument, 0, 1006},
         {"bytesPerISN", required_argument, 0, 1007}, // either 3 or 4
+        {"oncePerClient", no_argument, 0, 1008},
         {0, 0, 0, 0},
     };
 
@@ -478,6 +493,10 @@ int main(int argc, char **argv)
 
         case 1007:
             g_bytesPerISN = strtod(optarg, NULL);
+            break;
+
+        case 1008:
+            g_oncePerClient = true;
             break;
 
         default:
