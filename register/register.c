@@ -19,6 +19,7 @@
 #include "openssl/ssl.h"
 #include "openssl/err.h"
 #include "curve25519-20050915/curve25519.h"
+#include <math.h>
 
 static const char Id[] =
   "$Id$";
@@ -127,7 +128,8 @@ struct tcpheader {
  */
 void
 print_hex_ascii_line(const char *header /* optional */,
-                     const unsigned char *payload, int len, int offset)
+                     const unsigned char *payload, int len, int offset,
+                     const int hexonly)
 {
 
   int i;
@@ -160,6 +162,8 @@ print_hex_ascii_line(const char *header /* optional */,
       printf("   ");
     }
   }
+
+  if (!hexonly) {
   printf("   ");
 
   /* ascii (if printable) */
@@ -172,6 +176,7 @@ print_hex_ascii_line(const char *header /* optional */,
     ch++;
     if (((i + 1) % 4) == 0)
       printf(" ");
+  }
   }
 
   printf("\n");
@@ -234,8 +239,8 @@ getciphertext(const u_char *sharedcurvekey,
     cipherkey, cipheriv);
   bail_require(keylen == cipher->key_len);
 
-  print_hex_ascii_line("cipherkey", cipherkey, sizeof cipherkey, 0);
-  print_hex_ascii_line("cipheriv ", cipheriv, sizeof cipheriv, 0);
+  print_hex_ascii_line("cipherkey", cipherkey, sizeof cipherkey, 0, 1);
+  print_hex_ascii_line("cipheriv ", cipheriv, sizeof cipheriv, 0, 1);
 
   benc = BIO_new(BIO_f_cipher());
   bail_null(benc);
@@ -295,13 +300,18 @@ int main(int argc, char *argv[])
 
   memset(buffer, 0, PCKT_LEN);
 
-  if(argc != 4)
+  if(argc != 5)
   {
     printf("- Invalid parameters!!!\n");
-    printf("- Usage: %s <target IP> <target port> <RS curve25519 pubkey file>\n", argv[0]);
+    printf("- Usage: %s <target IP> <target port> <RS curve25519 pubkey file> <3 or 4 (bytes per ISN)?>\n", argv[0]);
     printf("  - RS is 'registration server'\n");
+    printf("  - the target is some host (might not even exist) such that our\n");
+    printf("    packets are routed through to the registration server\n");
     exit(-1);
   }
+
+  const unsigned int bytesPerISN = strtod(argv[4], NULL);
+  assert (bytesPerISN == 3 || bytesPerISN == 4);
 
   BIO *rspubkeybio = BIO_new_file(argv[3], "rb");
   bail_null_msg(rspubkeybio, "can't open RS pubkey file");
@@ -318,17 +328,20 @@ int main(int argc, char *argv[])
   u_char sharedkey[CURVE25519_KEYSIZE] = {0};
   curve25519(sharedkey, myseckey, rspubkey);
 
-  print_hex_ascii_line("mypubkey ", mypubkey, sizeof mypubkey, 0);
-  print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
-
   u_char rsciphertext[4] = {0};
   u_char proxysynciphertext[4] = {0};
   u_char proxyackciphertext[4] = {0};
   bail_error(getciphertext(sharedkey, rsciphertext,
                            proxysynciphertext, proxyackciphertext));
 
-  print_hex_ascii_line("esignal", rsciphertext, sizeof rsciphertext, 0);
+//  print_hex_ascii_line("esignal", rsciphertext, sizeof rsciphertext, 0, 1);
 
+  u_char signal[sizeof mypubkey + sizeof rsciphertext];
+  memcpy(signal, mypubkey, sizeof mypubkey);
+  memcpy(signal + sizeof mypubkey, rsciphertext, sizeof rsciphertext);
+
+  print_hex_ascii_line("pubkey+ciphertext", signal, sizeof signal, 0, 1);
+  print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0, 1);
 
   /// handle the socket stuff
 
@@ -380,18 +393,13 @@ int main(int argc, char *argv[])
 
 // sendto() loop, send every 2 second for 50 counts
 
-  const int numrequiredpackets = (CURVE25519_KEYSIZE + 4) / 4;
+  const int numrequiredpackets = ceil(((double)(sizeof signal)) / bytesPerISN);
+  printf("numrequiredpackets = %d\n", numrequiredpackets);
   unsigned int count;
   for(count = 0; count < numrequiredpackets; count++)
   {
-    if (count < (numrequiredpackets - 1)) {
-      // use the pub key
-      memcpy(&tcp->tcph_seqnum, mypubkey + (4 * count), 4);
-    }
-    else {
-      // use the ciphertext
-      memcpy(&tcp->tcph_seqnum, rsciphertext, 4);
-    }
+    bzero(&tcp->tcph_seqnum, sizeof tcp->tcph_seqnum);
+    memcpy(&tcp->tcph_seqnum, signal + (bytesPerISN * count), bytesPerISN);
 
     assert(1 == RAND_bytes((unsigned char*)&(tcp->tcph_srcport),
                            sizeof(tcp->tcph_srcport)));
@@ -404,9 +412,10 @@ int main(int argc, char *argv[])
     }
     else
     {
-      printf("Count #%u - sendto() is OK\n", count);
+      printf("Count #%u - sendto() is OK: ", count);
+      printf("tcp seqnum = 0x%x\n", tcp->tcph_seqnum);
     }
-    sleep(0.1);
+    sleep(0.5);
   }
 
 bail:
