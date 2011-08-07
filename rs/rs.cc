@@ -502,7 +502,12 @@ print_hex_ascii_line(const char *header /* optional */,
         }
     }
 
-    printf("\n");
+    if (os) {
+        *os << "\n";
+    }
+    else {
+        printf("\n");
+    }
 
     return;
 }
