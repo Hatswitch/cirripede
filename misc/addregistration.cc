@@ -109,6 +109,7 @@ struct sniff_tcp {
 #define log cout << __FILE__ << ":" << __LINE__ << ": "
 
 static unsigned long long g_count = 0;
+static unsigned long long g_writecount = 0; // num of pkts written
 static u_char g_rspubkey[CURVE25519_KEYSIZE] = {0};
 static pcap_dumper_t* g_dumperhandle = NULL;
 static int g_machdrlen = SIZE_ETHERNET;
@@ -124,7 +125,11 @@ static uint32_t g_numRequiredPkts = 0;
 // to improve performance significantly
 static bool g_useOneKey = false;
 static u_char g_signal[CURVE25519_KEYSIZE + 4] = {0};
+// whether to register at most once for each client
 static bool g_oncePerClient = false;
+// if g_oncePerClient is true, whether to discard (ie, not write to
+// output) subsequent packets from the client
+static bool g_discardSubsequentPackets = false;
 
 struct Client {
     u_char _signal[CURVE25519_KEYSIZE + 4]; // pubkey, then 4 bytes
@@ -320,14 +325,16 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     g_count ++;
 
     if (ip_version != 4) {
-        goto bail;
+        // don't even output this packet
+        return;
     }
 
     ip = (struct sniff_ip*)(packet + g_machdrlen);
     iphdrlen = IP_HL(ip)*4;
 
     if (ip->ip_p != IPPROTO_TCP || iphdrlen < 20) {
-        goto bail;
+        // don't even output this packet
+        return;
     }
     
     /*
@@ -337,13 +344,19 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     tcp = (struct sniff_tcp*)(packet + g_machdrlen + iphdrlen);
     tcphdrlen = TH_OFF(tcp)*4;
     if (tcphdrlen < 20 || tcp->th_flags != TH_SYN) {
-        goto bail;
+        // don't even output this packet
+        return;
     }
 
     if (g_oncePerClient &&
         clientsHaveReg.end() != clientsHaveReg.find(ip->ip_src.s_addr)) {
         // client has registered once -> skip
-        goto bail;
+        if (g_discardSubsequentPackets) {
+            return;
+        }
+        else {
+            goto bail;
+        }
     }
 
 #define COPY_INTO_ISN(tcpISNPtr, signal, offset, numBytesPerISN)        \
@@ -418,7 +431,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 bail:
     // we dump the packet no matter what
     pcap_dump((u_char*)g_dumperhandle, header, packet);
-
+    g_writecount++;
     return;
 }
 
@@ -442,8 +455,10 @@ int main(int argc, char **argv)
         {"outpcapfilepath", required_argument, 0, 1003},
         {"verbose", no_argument, 0, 1005},
         {"use-one-key", no_argument, 0, 1006},
-        {"bytesPerISN", required_argument, 0, 1007}, // either 3 or 4
-        {"oncePerClient", no_argument, 0, 1008},
+        // required arg is either 3 or 4
+        {"bytesPerISN", required_argument, 0, 1007},
+        // required arg is: <discardSubsequentPackets> (1 or 0)
+        {"oncePerClient", required_argument, 0, 1008},
         {0, 0, 0, 0},
     };
 
@@ -497,12 +512,19 @@ int main(int argc, char **argv)
 
         case 1008:
             g_oncePerClient = true;
+            g_discardSubsequentPackets = (optarg[0] == '1');
             break;
 
         default:
             exit(-1);
             break;
         }
+    }
+
+    if (g_discardSubsequentPackets) {
+        bail_require_msg(
+            g_oncePerClient,
+            "discardSubsequentPackets can only be used with oncePerClient");
     }
 
     bail_require_msg(g_bytesPerISN == 3 || g_bytesPerISN == 4,
@@ -562,7 +584,8 @@ int main(int argc, char **argv)
     pcap_loop(handle, 0, got_packet, NULL);
 
     /* cleanup */
-    printf("\nTotal packet count: %llu\n", g_count);
+    printf("\nTotal read packet count: %llu\n", g_count);
+    printf("\nTotal written packet count: %llu\n", g_writecount);
     printf("\nComplete signals count: %llu\n", g_completeSignalCount);
 
     err = 0;
