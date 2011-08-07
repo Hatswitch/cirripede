@@ -416,9 +416,6 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             u_char sharedkey[CURVE25519_KEYSIZE];
             curve25519(sharedkey, seckey, g_rspubkey);
 
-            // u_char proxysynciphertext[4] = {0};
-            // u_char proxyackciphertext[4] = {0};
-
             bail_error(getciphertext(sharedkey, client._signal + CURVE25519_KEYSIZE));
 
             COPY_INTO_ISN(&(tcp->th_seq), client._signal,
@@ -578,6 +575,9 @@ int main(int argc, char **argv)
         computepublickey(g_signal, seckey);
         curve25519(sharedkey, seckey, g_rspubkey);
         bail_error(getciphertext(sharedkey, g_signal + CURVE25519_KEYSIZE));
+
+        printf("using one key\n");
+        print_hex_ascii_line("pubkey+signal", g_signal, sizeof g_signal, 0);
     }
 
     /* now we can set our callback function */
