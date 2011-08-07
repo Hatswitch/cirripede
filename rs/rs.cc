@@ -212,6 +212,8 @@
 #include "openssl/ssl.h"
 #include "openssl/err.h"
 #include <getopt.h>
+#include <sstream>
+#include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/shared_ptr.hpp>
 #include <string>
@@ -239,6 +241,8 @@ using std::cout;
 using std::endl;
 using std::map;
 using std::vector;
+using std::ostream;
+using std::stringstream;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
@@ -399,6 +403,7 @@ void thread_cleanup(void)
 void
 print_hex_ascii_line(const char *header /* optional */,
                      const unsigned char *payload, int len, int offset,
+                     ostream* os = NULL,
                      const bool hexonly=true)
 {
 
@@ -407,46 +412,94 @@ print_hex_ascii_line(const char *header /* optional */,
     const unsigned char *ch;
 
     if (header) {
-        printf("%s:\n", header);
+        if (os) {
+            (*os) << boost::format("%s:\n") % header;
+        }
+        else {
+            printf("%s:\n", header);
+        }
     }
-    /* offset */
-    printf("%05d   ", offset);
 
     /* hex */
     ch = payload;
     for(i = 0; i < len; i++) {
-        printf("%02x", *ch);
+        if (os) {
+            *os << boost::format("%02x") % (int)(*ch);
+        }
+        else {
+            printf("%02x", *ch);
+        }
         ch++;
         /* print extra space after 8th byte for visual aid */
-        if (((i + 1) % 4) == 0)
-            printf(" ");
+        if (((i + 1) % 4) == 0) {
+            if (os) {
+                *os << (" ");
+            }
+            else {
+                printf(" ");
+            }
+        }
     }
     /* print space to handle line less than 8 bytes */
-    if (len < 8)
-        printf(" ");
+    if (len < 8) {
+        if (os) {
+            *os << " ";
+        }
+        else {
+            printf(" ");
+        }
+    }
 
     /* fill hex gap with spaces if not full line */
     if (len < 16) {
         gap = 16 - len;
         for (i = 0; i < gap; i++) {
-            printf("   ");
+            if (os) {
+                *os << "   ";
+            }
+            else {
+                printf("   ");
+            }
         }
     }
 
     if (!hexonly) {
-    printf("   ");
+        if (os) {
+            *os << ("   ");
+        }
+        else {
+            printf("   ");
+        }
 
-    /* ascii (if printable) */
-    ch = payload;
-    for(i = 0; i < len; i++) {
-        if (isprint(*ch))
-            printf("%c", *ch);
-        else
-            printf(".");
-        ch++;
-        if (((i + 1) % 4) == 0)
-            printf(" ");
-    }
+        /* ascii (if printable) */
+        ch = payload;
+        for(i = 0; i < len; i++) {
+            if (isprint(*ch)) {
+                if (os) {
+                    *os << boost::format("%c") % (*ch);
+                }
+                else {
+                    printf("%c", *ch);
+                }
+            }
+            else {
+                if (os) {
+                    *os << (".");
+                }
+                else {
+                    printf(".");
+                }
+            }
+            ch++;
+            if (((i + 1) % 4) == 0) {
+                if (os) {
+                    *os << (" ");
+                }
+                else {
+                    printf(" ");
+                }
+            }
+        }
     }
 
     printf("\n");
@@ -825,6 +878,11 @@ handleSynPackets(const string& threadname,
             // reset pkt count
             cs->_pktcount = 0;
 
+#if 0
+            stringstream ss;
+            print_hex_ascii_line("pubkey+signal", cs->_signal, sizeof (cs->_signal), 0, &ss);
+#endif
+
             /* if g_dont_cmp_ciphertext is true, then we just accept
              * no matter what.
              */
@@ -854,7 +912,9 @@ handleSynPackets(const string& threadname,
             }
             else {
 #if 0
-                MYLOGDEBUG("   ciphertext does not match");
+                MYLOGINFO("   client "
+                          << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                          << " (" << ip << ") not matched: " << string(ss.str()));
 #endif
                 // remove cs from map if client is not currently registered
                 if (cs->_state != CS_ST_REGISTERED) {
