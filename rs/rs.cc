@@ -523,6 +523,9 @@ public:
 
     const u_long _ip_src;
     u_char _tcp_seq[4];
+#if 0
+    struct timeval _ts;
+#endif
 };
 
 typedef enum  {
@@ -541,6 +544,10 @@ public:
     u_short _pktcount; // for registration purpose
     time_t _lastSeen; // time of last SYN packet seen
     time_t _regTime; // time when registration succeeds
+
+#if 0
+    vector<shared_ptr<SynPacket_t> > _synpkts;
+#endif
 };
 
 
@@ -660,6 +667,10 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
 
     synpkt = make_shared<SynPacket_t>(ip->ip_src.s_addr, (u_char*)&(tcp->th_seq));
+
+#if 0
+    synpkt->_ts = header->ts;
+#endif
 
 #if 0
     uint32_t _ip;
@@ -830,6 +841,10 @@ handleSynPackets(const string& threadname,
 
         ///// at this point, cs is a valid entry in the map /////
 
+#if 0
+        cs->_synpkts.push_back(synpkt);
+#endif
+
         now = time(NULL);
         cs->_lastSeen = now;
 
@@ -917,9 +932,29 @@ handleSynPackets(const string& threadname,
             }
             else {
 #if 0
-                MYLOGINFO("   client "
-                          << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
-                          << " (" << ip << ") not matched: " << string(ss.str()));
+                if (numMisMatch++ < 10) {
+                    MYLOGINFO("   client "
+                              << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                              << " (" << ip << ") not matched: " << string(ss.str()));
+                    for (size_t i = 0; i < (cs->_synpkts.size()); ++i) {
+                        stringstream _ss;
+                        print_hex_ascii_line("tcp seq", cs->_synpkts[i]->_tcp_seq, g_bytesPerISN, 0, &_ss);
+                        MYLOGINFO(" synpkt num " << i << ": tv_sec = " << cs->_synpkts[i]->_ts.tv_sec
+                                  << ", tv_usec = " << cs->_synpkts[i]->_ts.tv_usec
+                                  << ", " << string(_ss.str()));
+                    }
+                    for (size_t i = 0; i < (cs->_synpkts.size() - 1); ++i) {
+                        if (cs->_synpkts[i]->_ts.tv_sec > cs->_synpkts[i+1]->_ts.tv_sec ||
+                            ((cs->_synpkts[i]->_ts.tv_sec == cs->_synpkts[i+1]->_ts.tv_sec) &&
+                             (cs->_synpkts[i]->_ts.tv_usec > cs->_synpkts[i+1]->_ts.tv_usec)))
+                        {
+                            MYLOGINFO("   client "
+                                      << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
+                                      << ": ERROR: synpkt " << i << " has larger timestamp "
+                                      << "than synpkt " << i+1);
+                        }
+                    }
+                }
 #endif
                 // remove cs from map if client is not currently registered
                 if (cs->_state != CS_ST_REGISTERED) {
@@ -929,6 +964,9 @@ handleSynPackets(const string& threadname,
 #endif
                 }
             }
+#if 0
+            cs->_synpkts.clear();
+#endif
         }
 bail:
         continue;
