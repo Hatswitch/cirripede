@@ -5,7 +5,12 @@ class Fp:
     p = 2**255 - 19
     def __init__(self,x):  
         if isinstance(x,Fp):
-            self.x = x.x
+            self.x = x.x       
+        elif isinstance(x,str):
+            self.x = 0
+            for i in range(len(x),0,-2):
+                self.x *= 256
+                self.x += int(x[i-2:i],16)
         else:
             self.x = x % self.p
     
@@ -29,7 +34,10 @@ class Fp:
         return Fp(pow(self.x,self.p-2,self.p))
         
     def __eq__(self,other):
-        return self.x == Fp(other).x     
+        try:
+            return self.x == Fp(other).x
+        except TypeError:
+            return False     
         
     def __rmul__(self,other):
         return self.__mul__(other)   
