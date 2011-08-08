@@ -390,9 +390,6 @@ static struct sockaddr_in g_proxyaddr;
 static int g_drCtlSocket = -1;
 static struct sockaddr_in g_drAddr;
 bool g_verbose = false;
-bool g_dont_cmp_ciphertext = false;
-bool g_hardcode_sharedkey = false;
-static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static bool g_terminate = false;
 static uint32_t g_validationInterval = 0;
 static uint32_t g_bytesPerISN = 0;
@@ -529,12 +526,10 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         curve25519(sharedkey, g_myseckey, cs->_signal);
 
         if (g_verbose) {
-            if (!g_hardcode_sharedkey) {
-                print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
-            }
+            print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
         }
         u_char kdf_data[(sizeof sharedkey) + 1];
-        memcpy(kdf_data, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
+        memcpy(kdf_data, sharedkey, sizeof sharedkey);
         kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
 
         u_char cipherkey[EVP_MAX_KEY_LENGTH];
@@ -555,10 +550,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         // reset pkt count
         cs->_pktcount = 0;
 
-        /* if g_dont_cmp_ciphertext is true, then we just accept
-         * no matter what.
-         */
-        if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+        if (0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
             g_regCount++;
 
             cs->_regTime = now;
@@ -579,7 +571,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             }
 
             // but always notify sp because we assume client is using new key materials
-            notifyProxy(clientipaddr, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
+            notifyProxy(clientipaddr, sharedkey, sizeof sharedkey);
 
             cs->_state = CS_ST_REGISTERED;
         }
@@ -675,7 +667,7 @@ void signal_callback_handler(int signum)
 
 int main(int argc, char **argv)
 {
-
+    int err = 1;
 	char *dev = NULL;			/* capture device name */
 	char errbuf[PCAP_ERRBUF_SIZE];		/* error buffer */
 
@@ -707,8 +699,6 @@ int main(int argc, char **argv)
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
-        {"dont-compare-ciphertext", no_argument, 0, 1006},
-        {"hardcode-sharedkey", required_argument, 0, 1007},
         {"drIP", required_argument, 0, 1008},
         {"drCtlPort", required_argument, 0, 1009},
         {"validationInterval", required_argument, 0, 1010}, // in seconds
@@ -755,16 +745,6 @@ int main(int argc, char **argv)
             g_verbose = true;
             break;
 
-        case 1006:
-            g_dont_cmp_ciphertext = true;
-            break;
-
-        case 1007:
-            g_hardcode_sharedkey = true;
-            memset(g_hardcoded_sharedkey, optarg[0],
-                   sizeof g_hardcoded_sharedkey);
-            break;
-
         case 1008:
             drIP = optarg;
             break;
@@ -805,16 +785,9 @@ int main(int argc, char **argv)
     bail_require_msg(garbagecollectioninterval != 0,
                      "must specify --garbageCollectionInterval");
 
-    bail_require_msg(
-        (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
-        "'dont-compare-ciphertext' and 'hardcode-sharedkey' should be used "
-        "only for testing");
+    bail_require_msg(dev, "must specify --device");
 
-    if (seckeypath && g_hardcode_sharedkey) {
-        fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
-        exit(-1);
-    }
-    if (!(seckeypath || g_hardcode_sharedkey) || !proxyip || !proxyctlport) {
+    if (!(seckeypath) || !proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
@@ -824,21 +797,13 @@ int main(int argc, char **argv)
         filter_exp += lexical_cast<string>(port);
     }
 
-    if (!g_hardcode_sharedkey) {
-        curvesecretfilebio = BIO_new_file(seckeypath, "rb");
-        bail_null(curvesecretfilebio);
+    curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+    bail_null(curvesecretfilebio);
 
-        bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
-    }
+    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
 
     if (g_verbose) {
-        if (!g_hardcode_sharedkey) {
-            print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
-        }
-        else {
-            print_hex_ascii_line("hardcoded sharedkey", g_hardcoded_sharedkey,
-                                 sizeof g_hardcoded_sharedkey, 0);
-        }
+        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
     }
 
     /* create control socket to the proxy */
@@ -858,16 +823,6 @@ int main(int argc, char **argv)
     g_drAddr.sin_family = AF_INET;
     g_drAddr.sin_addr.s_addr=inet_addr(drIP);
     g_drAddr.sin_port=htons(drCtlPort);
-
-	if (dev == NULL) {
-		/* find a capture device if not specified on command-line */
-		dev = pcap_lookupdev(errbuf);
-		if (dev == NULL) {
-			fprintf(stderr, "Couldn't find default device: %s\n",
-			    errbuf);
-			exit(EXIT_FAILURE);
-		}
-	}
 	
 	/* get network number and mask associated with capture device */
 	if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
@@ -944,10 +899,12 @@ int main(int argc, char **argv)
 
 	printf("\nCapture complete.\n");
 
+    err = 0;
+
 bail:
     openssl_safe_free(BIO, curvesecretfilebio);
 
-    return 0;
+    return err;
 }
 
 /*
@@ -957,15 +914,13 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
-           "          [--port <port>]\n"
+	printf("Usage: %s --curveseckey <curve25519 secret file>\n"
+           "          [--port <process SYNs on this port only>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --drIP ... --drCtlPort ... \n"
-           "          --bytesPerISN ... \n"
+           "          --bytesPerISN <3 or 4> \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
-           "          [--hardcode-sharedkey <one char>]\n"
-           "          [--dont-compare-ciphertext]\n"
-           "          [--device interface]\n", APP_NAME);
+           "          --device interface\n", APP_NAME);
 	printf("\n");
 
 return;
