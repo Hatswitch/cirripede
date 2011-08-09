@@ -110,7 +110,8 @@ struct sniff_tcp {
 
 static unsigned long long g_count = 0;
 static unsigned long long g_writecount = 0; // num of pkts written
-static u_char g_rspubkey[CURVE25519_KEYSIZE] = {0};
+static u_char g_rspubkey_base6[CURVE25519_KEYSIZE] = {0};
+static u_char g_rspubkey_base3[CURVE25519_KEYSIZE] = {0};
 static pcap_dumper_t* g_dumperhandle = NULL;
 static int g_machdrlen = SIZE_ETHERNET;
 static bool g_verbose = false;
@@ -121,10 +122,11 @@ static unsigned long long g_completeSignalCount = 0; // number of
 static uint32_t g_bytesPerISN = 0;
 static uint32_t g_numRequiredPkts = 0;
 
-// use one single key (and thus encrypted signals etc) for all clients
-// to improve performance significantly
+// use one single key per basepoint (and thus encrypted signals etc)
+// for all clients to improve performance significantly
 static bool g_useOneKey = false;
-static u_char g_signal[CURVE25519_KEYSIZE + 4] = {0};
+static u_char g_signal_base6[CURVE25519_KEYSIZE + 4] = {0};
+static u_char g_signal_base3[CURVE25519_KEYSIZE + 4] = {0};
 // whether to register at most once for each client
 static bool g_oncePerClient = false;
 // if g_oncePerClient is true, whether to discard (ie, not write to
@@ -218,16 +220,32 @@ void gensecretkey(unsigned char secret[CURVE25519_KEYSIZE])
             exit(-1);
         }
     }
-    secret[0] &= 248;
-    secret[31] &= 127;
-    secret[31] |= 64;
+    /* secret[0] &= 248; */
+    secret[31] &= 127; /* keep this line */
+    /* secret[31] |= 64; */
 }
 
-void computepublickey(unsigned char pub[CURVE25519_KEYSIZE],
-                      const unsigned char secret[CURVE25519_KEYSIZE])
+/* return 0 on success */
+int computepublickey(unsigned char pub[CURVE25519_KEYSIZE],
+                     const unsigned char secret[CURVE25519_KEYSIZE],
+                     const int basepoint /* either 6 or 3 */
+    )
 {
-    static const unsigned char basepoint[CURVE25519_KEYSIZE] = {9};
-    curve25519(pub,secret,basepoint);
+
+    if (basepoint == 6) {
+        static const unsigned char basepoint6[CURVE25519_KEYSIZE] = {6};
+        curve25519(pub,secret, basepoint6);
+        return 0;
+    }
+    else if (basepoint == 3) {
+        static const unsigned char basepoint3[CURVE25519_KEYSIZE] = {3};
+        curve25519(pub,secret, basepoint3);
+        return 0;
+    }
+    else {
+        printf("basepoint must be 6 or 3\n");
+        return 1; // error
+    }
 }
 
 int
@@ -369,22 +387,16 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     if (Common::inMap(g_ip2Clients, ip->ip_src.s_addr)) {
         Client_t& client = g_ip2Clients[ip->ip_src.s_addr];
         if (client._offset < sizeof (client._signal)) {
-            if (g_useOneKey) {
-                COPY_INTO_ISN(&(tcp->th_seq), g_signal,
-                              client._offset, g_bytesPerISN);
-            }
-            else {
-                COPY_INTO_ISN(&(tcp->th_seq), client._signal,
-                              client._offset, g_bytesPerISN);
-            }
+            COPY_INTO_ISN(&(tcp->th_seq), client._signal,
+                          client._offset, g_bytesPerISN);
         }
 
         if (client._offset == sizeof (client._signal)) {
             if (g_verbose) {
                 bail_null(inet_ntop(AF_INET, &ip->ip_src, ipaddrstr, sizeof ipaddrstr));
                 printf("client %s (%u) completed signal\n", ipaddrstr, ip->ip_src.s_addr);
-                print_hex_ascii_line("pubkey+signal",
-                                     g_useOneKey ? g_signal : client._signal,
+                print_hex_ascii_line("pubkey+tag",
+                                     client._signal,
                                      sizeof client._signal, 0);
                 printf("\n");
             }
@@ -406,10 +418,20 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         client._offset = 0;
 
         if (g_useOneKey) {
-            COPY_INTO_ISN(&(tcp->th_seq), g_signal,
+            const int r = rand();
+            if (r & 1) {
+                memcpy(client._signal, g_signal_base6, sizeof g_signal_base6);
+            }
+            else {
+                memcpy(client._signal, g_signal_base3, sizeof g_signal_base3);
+            }
+
+            COPY_INTO_ISN(&(tcp->th_seq), client._signal,
                           client._offset, g_bytesPerISN);
         }
         else {
+            assert(0); // not yet implemented
+#if 0
             u_char seckey[CURVE25519_KEYSIZE];
             gensecretkey(seckey);
             computepublickey(client._signal, seckey);
@@ -420,6 +442,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
             COPY_INTO_ISN(&(tcp->th_seq), client._signal,
                           client._offset, g_bytesPerISN);
+#endif
         }
 
         g_ip2Clients[ip->ip_src.s_addr] = client;
@@ -435,7 +458,8 @@ bail:
 int main(int argc, char **argv)
 {
     int err = 1;
-    const char *rspubkeypath = NULL;
+    const char *rspubkeybase6path = NULL;
+    const char *rspubkeybase3path = NULL;
     const char *inpcapfilepath = NULL;
     const char *outpcapfilepath = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];      /* error buffer */
@@ -448,7 +472,6 @@ int main(int argc, char **argv)
 
     struct option long_options[] = {
         {"inpcapfilepath", required_argument, 0, 1001},
-        {"rspubkeypath", required_argument, 0, 1002},
         {"outpcapfilepath", required_argument, 0, 1003},
         {"verbose", no_argument, 0, 1005},
         {"use-one-key", no_argument, 0, 1006},
@@ -456,6 +479,8 @@ int main(int argc, char **argv)
         {"bytesPerISN", required_argument, 0, 1007},
         // required arg is: <discardSubsequentPackets> (1 or 0)
         {"oncePerClient", required_argument, 0, 1008},
+        {"rspubkeybase6", required_argument, 0, 1009},
+        {"rspubkeybase3", required_argument, 0, 1010},
         {0, 0, 0, 0},
     };
 
@@ -487,10 +512,6 @@ int main(int argc, char **argv)
             inpcapfilepath = optarg;
             break;
 
-        case 1002:
-            rspubkeypath = optarg;
-            break;
-
         case 1003:
             outpcapfilepath = optarg;
             break;
@@ -512,6 +533,14 @@ int main(int argc, char **argv)
             g_discardSubsequentPackets = (optarg[0] == '1');
             break;
 
+        case 1009:
+            rspubkeybase6path = optarg;
+            break;
+
+        case 1010:
+            rspubkeybase3path = optarg;
+            break;
+
         default:
             exit(-1);
             break;
@@ -531,14 +560,24 @@ int main(int argc, char **argv)
 
     assert(inpcapfilepath != NULL);
     assert(outpcapfilepath != NULL);
-    assert(rspubkeypath != NULL);
+    bail_require_msg(rspubkeybase6path, "must specify --rspubkeybase6");
+    bail_require_msg(rspubkeybase3path, "must specify --rspubkeybase3");
 
-    rs_curve_pubkey_filebio = BIO_new_file(rspubkeypath, "rb");
+    rs_curve_pubkey_filebio = BIO_new_file(rspubkeybase6path, "rb");
     assert(rs_curve_pubkey_filebio != NULL);
 
     bail_require_msg(
-        sizeof g_rspubkey == BIO_read(
-            rs_curve_pubkey_filebio, g_rspubkey, sizeof g_rspubkey),
+        sizeof g_rspubkey_base6 == BIO_read(
+            rs_curve_pubkey_filebio, g_rspubkey_base6, sizeof g_rspubkey_base6),
+        "error reading rs curve pub key");
+
+    openssl_safe_free(BIO, rs_curve_pubkey_filebio);
+    rs_curve_pubkey_filebio = BIO_new_file(rspubkeybase3path, "rb");
+    assert(rs_curve_pubkey_filebio != NULL);
+
+    bail_require_msg(
+        sizeof g_rspubkey_base3 == BIO_read(
+            rs_curve_pubkey_filebio, g_rspubkey_base3, sizeof g_rspubkey_base3),
         "error reading rs curve pub key");
 
     /* open input pcap file */
@@ -567,18 +606,35 @@ int main(int argc, char **argv)
     }
 
     if (g_useOneKey) {
-        assert(sizeof g_signal == sizeof ((Client_t*)NULL)->_signal);
+        printf("using one key per basepoint\n");
+        assert(sizeof g_signal_base6 == sizeof ((Client_t*)NULL)->_signal);
         u_char seckey[CURVE25519_KEYSIZE];
         u_char sharedkey[CURVE25519_KEYSIZE];
 
         gensecretkey(seckey);
-        computepublickey(g_signal, seckey);
-        curve25519(sharedkey, seckey, g_rspubkey);
-        bail_error(getciphertext(sharedkey, g_signal + CURVE25519_KEYSIZE));
+        computepublickey(g_signal_base6, seckey, 6);
+        curve25519(sharedkey, seckey, g_rspubkey_base6);
+        bail_error(
+            getciphertext(sharedkey, g_signal_base6 + CURVE25519_KEYSIZE));
 
-        printf("using one key\n");
-        print_hex_ascii_line("pubkey+signal", g_signal, sizeof g_signal, 0);
+        print_hex_ascii_line(
+            "pubkey+tag base6", g_signal_base6, sizeof g_signal_base6, 0);
+
+
+
+        gensecretkey(seckey);
+        computepublickey(g_signal_base3, seckey, 3);
+        curve25519(sharedkey, seckey, g_rspubkey_base3);
+        bail_error(
+            getciphertext(sharedkey, g_signal_base3 + CURVE25519_KEYSIZE));
+
+        print_hex_ascii_line(
+            "pubkey+tag base3", g_signal_base3, sizeof g_signal_base3, 0);
     }
+
+    int seed;
+    assert(1 == RAND_bytes((unsigned char*)&seed, sizeof seed));
+    srand(seed);
 
     /* now we can set our callback function */
     pcap_loop(handle, 0, got_packet, NULL);
