@@ -557,9 +557,6 @@ static struct sockaddr_in g_proxyaddr;
 static int g_drCtlSocket = -1;
 static struct sockaddr_in g_drAddr;
 bool g_verbose = false;
-bool g_dont_cmp_ciphertext = false;
-bool g_hardcode_sharedkey = false;
-static u_char g_hardcoded_sharedkey[CURVE25519_KEYSIZE] = {0};
 static unsigned long long g_pktcount = 0;
 static vector<boost::thread *> g_handlerthreads;
 static uint16_t g_validationInterval = 0;
@@ -860,7 +857,7 @@ handleSynPackets(const string& threadname,
             curve25519(sharedkey, g_myseckey, cs->_signal);
 
             u_char kdf_data[(sizeof sharedkey) + 1];
-            memcpy(kdf_data, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
+            memcpy(kdf_data, sharedkey, sizeof sharedkey);
             kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
 
             u_char cipherkey[EVP_MAX_KEY_LENGTH] = {0};
@@ -881,10 +878,8 @@ handleSynPackets(const string& threadname,
             if (g_verbose) {
                 print_hex_ascii_line("clientkey", cs->_signal,
                                      CURVE25519_KEYSIZE, 0);
-                if (!g_hardcode_sharedkey) {
-                    print_hex_ascii_line("sharedkey", sharedkey,
-                                         sizeof sharedkey, 0);
-                }
+                print_hex_ascii_line("sharedkey", sharedkey,
+                                     sizeof sharedkey, 0);
                 print_hex_ascii_line("cipherkey", cipherkey,
                                      sizeof cipherkey, 0);
                 print_hex_ascii_line("cipheriv ", cipheriv,
@@ -903,10 +898,7 @@ handleSynPackets(const string& threadname,
             print_hex_ascii_line("pubkey+signal", cs->_signal, sizeof (cs->_signal), 0, &ss);
 #endif
 
-            /* if g_dont_cmp_ciphertext is true, then we just accept
-             * no matter what.
-             */
-            if (g_dont_cmp_ciphertext || 0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+            if (0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
                 regCount++;
                 cs->_regTime = now;
 
@@ -926,7 +918,7 @@ handleSynPackets(const string& threadname,
                 }
 
                 // but always notify sp because we assume client is using new key materials
-                notifyProxy(ip, g_hardcode_sharedkey ? g_hardcoded_sharedkey : sharedkey, sizeof sharedkey);
+                notifyProxy(ip, sharedkey, sizeof sharedkey);
 
                 cs->_state = CS_ST_REGISTERED;
             }
@@ -1030,8 +1022,6 @@ int main(int argc, char **argv)
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
-        {"dont-compare-ciphertext", no_argument, 0, 1006},
-        {"hardcode-sharedkey", required_argument, 0, 1007},
         {"drIP", required_argument, 0, 1008},
         {"drCtlPort", required_argument, 0, 1009},
         {"numThreads", required_argument, 0, 1010}, // should be power of 2
@@ -1077,16 +1067,6 @@ int main(int argc, char **argv)
 
         case 1005:
             g_verbose = true;
-            break;
-
-        case 1006:
-            g_dont_cmp_ciphertext = true;
-            break;
-
-        case 1007:
-            g_hardcode_sharedkey = true;
-            memset(g_hardcoded_sharedkey, optarg[0],
-                   sizeof g_hardcoded_sharedkey);
             break;
 
         case 1008:
@@ -1138,18 +1118,9 @@ int main(int argc, char **argv)
     bail_require_msg(g_garbagecollectioninterval.total_seconds() != 0,
                      "must specify --garbageCollectionInterval");
 
-    bail_require_msg(
-        (!g_dont_cmp_ciphertext) && (!g_hardcode_sharedkey),
-        "'dont-compare-ciphertext' and 'hardcode-sharedkey' should be used "
-        "only for testing");
-
     bail_require_msg(ISPOWEROF2(numThreads), "numThreads must be power of 2");
 
-    if (seckeypath && g_hardcode_sharedkey) {
-        fprintf(stderr, "dont use both --curveseckey and --hardcode-sharedkey\n");
-        exit(-1);
-    }
-    if (!(seckeypath || g_hardcode_sharedkey) || !proxyip || !proxyctlport) {
+    if (!(seckeypath) || !proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
@@ -1159,21 +1130,13 @@ int main(int argc, char **argv)
         filter_exp += lexical_cast<string>(port);
     }
 
-    if (!g_hardcode_sharedkey) {
-        curvesecretfilebio = BIO_new_file(seckeypath, "rb");
-        bail_null(curvesecretfilebio);
+    curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+    bail_null(curvesecretfilebio);
 
-        bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
-    }
+    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
 
     if (g_verbose) {
-        if (!g_hardcode_sharedkey) {
-            print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
-        }
-        else {
-            print_hex_ascii_line("hardcoded sharedkey", g_hardcoded_sharedkey,
-                                 sizeof g_hardcoded_sharedkey, 0);
-        }
+        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
     }
 
     // Set up a simple configuration that logs on the console.
@@ -1297,9 +1260,7 @@ print_app_usage(void)
            "          --drIP ... --drCtlPort ... \n"
            "          --bytesPerISN ... \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
-           "          [--hardcode-sharedkey <one char>]\n"
-           "          [--dont-compute-ciphertext]\n"
-           "          [--device interface]\n", APP_NAME);
+           "          --device interface\n", APP_NAME);
     printf("\n");
 
     return;
