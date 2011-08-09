@@ -124,6 +124,8 @@ static bool g_verbose = false;
 static unsigned long long g_completeSignalCount = 0; // number of
 						     // whole/complete
 						     // signals added
+static unsigned long long g_completeSignalCount_base6 = 0;
+static unsigned long long g_completeSignalCount_base3 = 0;
 
 static uint32_t g_bytesPerISN = 0;
 static uint32_t g_numRequiredPkts = 0;
@@ -410,6 +412,12 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             // fresh client later
             g_ip2Clients.erase(ip->ip_src.s_addr);
             g_completeSignalCount ++;
+	    if (!memcmp(client._signal, g_signal_base6, sizeof g_signal_base6)) {
+	      g_completeSignalCount_base6++;
+	    }
+	    else {
+	      g_completeSignalCount_base3++;
+	    }
             if (g_oncePerClient) {
                 // remember that we have registered this client
                 clientsHaveReg.insert(ip->ip_src.s_addr);
@@ -649,6 +657,8 @@ int main(int argc, char **argv)
     printf("\nTotal read packet count: %llu\n", g_count);
     printf("\nTotal written packet count: %llu\n", g_writecount);
     printf("\nComplete signals count: %llu\n", g_completeSignalCount);
+    printf("\nComplete base-6 signals count: %llu\n", g_completeSignalCount_base6);
+    printf("\nComplete base-3 signals count: %llu\n", g_completeSignalCount_base3);
 
     err = 0;
 
