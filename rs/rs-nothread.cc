@@ -220,6 +220,14 @@
 #include <map>
 #include "common.hpp"
 #include <math.h>
+#include <iostream>
+#include <string>
+#include <sstream>
+#include <algorithm>
+#include <iterator>
+#include <boost/algorithm/string.hpp>
+#include <boost/functional/hash.hpp>
+#include <vector>
 
 extern "C" {
 #include "curve25519-20050915/curve25519.h"
@@ -232,6 +240,7 @@ using std::string;
 using std::cout;
 using std::endl;
 using std::map;
+using std::vector;
 
 using boost::lexical_cast;
 using boost::shared_ptr;
@@ -384,7 +393,8 @@ public:
     time_t _regTime;
 };
 
-static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
+static u_char g_myseckeybase6[CURVE25519_KEYSIZE] = {0};
+static u_char g_myseckeybase3[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
 static int g_drCtlSocket = -1;
@@ -399,13 +409,18 @@ static unsigned long long g_numClientsGarbageCollected = 0;
 static pcap_t *g_handle = NULL; /* packet capture handle */
 static unsigned long long g_pktCount = 0; // num of pkts handled here
 static unsigned long long g_regCount = 0; // num of successful registrations
+static unsigned long long g_regCount_base6 = 0; // num of successful
+                                                // reg using base-4
+static unsigned long long g_regCount_base3 = 0; // num of successful
+                                                // reg using base-3
 static unsigned long long g_cryptoCount = 0; // num of times we need to do crypto ops
 
-static int g_machdrlen = SIZE_ETHERNET;
+static const int g_machdrlen = SIZE_ETHERNET;
 
 static map<uint32_t, shared_ptr<ClientState_t> > g_clients;
 
 static const EVP_CIPHER *g_signallingcipher = EVP_aes_128_cbc();
+static const EVP_MD *g_signallinghash = EVP_sha1();
 static const u_char g_register_str[] = "register";
 #define REGISTER_STRLEN ((sizeof g_register_str) - 1)
 
@@ -464,6 +479,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 void
 print_app_usage(void);
 
+#if 0
 void
 got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
@@ -523,10 +539,11 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     if (cs->_pktcount == g_numRequiredPkts) {
         // we have enough packets --> detect signal
         u_char sharedkey[CURVE25519_KEYSIZE];
-        curve25519(sharedkey, g_myseckey, cs->_signal);
+        curve25519(sharedkey, g_myseckeybase6, cs->_signal);
 
         if (g_verbose) {
-            print_hex_ascii_line("sharedkey", sharedkey, sizeof sharedkey, 0);
+            print_hex_ascii_line("sharedkey base-6",
+                                 sharedkey, sizeof sharedkey, 0);
         }
         u_char kdf_data[(sizeof sharedkey) + 1];
         memcpy(kdf_data, sharedkey, sizeof sharedkey);
@@ -536,7 +553,8 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
         u_char cipheriv[EVP_MAX_IV_LENGTH];
 
         int retval = EVP_BytesToKey(
-            g_signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+            g_signallingcipher, g_signallinghash,
+            NULL, kdf_data, sizeof kdf_data, 1,
             cipherkey, cipheriv);
         bail_require(retval == g_signallingcipher->key_len);
 
@@ -552,6 +570,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 
         if (0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
             g_regCount++;
+            g_regCount_base6++;
 
             cs->_regTime = now;
 
@@ -580,6 +599,158 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
             // remove cs from map if client is not currently registered
             if (cs->_state != CS_ST_REGISTERED) {
                 g_clients.erase(clientipaddr);
+            }
+        }
+    }
+
+bail:
+    return;
+}
+#endif
+
+void
+got_packet2(const uint32_t& clientipaddr, const uint32_t& ISN)
+{
+    shared_ptr<ClientState_t> cs;
+    time_t now;
+    char addrstr[INET_ADDRSTRLEN];
+
+    g_pktCount ++;
+
+    if (Common::inMap(g_clients, clientipaddr)) {
+        cs = g_clients[clientipaddr];
+    }
+    else {
+        cs = make_shared<ClientState_t>();
+        // put it into the map
+        g_clients[clientipaddr] = cs;
+    }
+
+    ///// at this point, cs is a valid entry in the map /////
+
+    // update last seen
+    now = time(NULL);
+    cs->_lastSeen = now;
+
+    // increment first
+    cs->_pktcount += 1;
+
+    memcpy(cs->_signal + ((cs->_pktcount - 1) * g_bytesPerISN),
+           &(ISN), g_bytesPerISN);
+
+    if (cs->_pktcount == g_numRequiredPkts) {
+        // we have enough packets --> detect signal
+        u_char sharedkey[CURVE25519_KEYSIZE];
+        curve25519(sharedkey, g_myseckeybase6, cs->_signal);
+
+        if (g_verbose) {
+            print_hex_ascii_line("sharedkey base-6",
+                                 sharedkey, sizeof sharedkey, 0);
+        }
+        u_char kdf_data[(sizeof sharedkey) + 1];
+        memcpy(kdf_data, sharedkey, sizeof sharedkey);
+        kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
+
+        u_char cipherkey[EVP_MAX_KEY_LENGTH];
+        u_char cipheriv[EVP_MAX_IV_LENGTH];
+
+        int retval = EVP_BytesToKey(
+            g_signallingcipher, g_signallinghash,
+            NULL, kdf_data, sizeof kdf_data, 1,
+            cipherkey, cipheriv);
+        bail_require(retval == g_signallingcipher->key_len);
+
+        u_char rsciphertext[4];
+        bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
+                           g_register_str, REGISTER_STRLEN,
+                           rsciphertext, sizeof rsciphertext));
+
+        g_cryptoCount ++;
+
+        // reset pkt count
+        cs->_pktcount = 0;
+
+        if (!memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+            g_regCount++;
+            g_regCount_base6++;
+
+            cs->_regTime = now;
+
+            if (g_verbose) {
+                char timestr[30];
+                log << "   client "
+                    << inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
+                    << " (" << clientipaddr << ") (re)registered at time "
+                    << ctime_r(&(cs->_regTime), timestr);
+            }
+
+            /// client might be already currently registered
+
+            /// if so, dont need to notify dr
+            if (cs->_state != CS_ST_REGISTERED) {
+                notifyDR(clientipaddr);
+            }
+
+            // but always notify sp because we assume client is using
+            // new key materials
+            notifyProxy(clientipaddr, sharedkey, sizeof sharedkey);
+
+            cs->_state = CS_ST_REGISTERED;
+        }
+        else {
+            // no match using base-6, now try base-3
+            curve25519(sharedkey, g_myseckeybase3, cs->_signal);
+
+            if (g_verbose) {
+                print_hex_ascii_line("sharedkey base-3",
+                                     sharedkey, sizeof sharedkey, 0);
+            }
+            memcpy(kdf_data, sharedkey, sizeof sharedkey);
+            kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
+
+            int retval = EVP_BytesToKey(
+                g_signallingcipher, g_signallinghash,
+                NULL, kdf_data, sizeof kdf_data, 1,
+                cipherkey, cipheriv);
+            bail_require(retval == g_signallingcipher->key_len);
+
+            bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
+                               g_register_str, REGISTER_STRLEN,
+                               rsciphertext, sizeof rsciphertext));
+
+            if (!memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+                g_regCount++;
+                g_regCount_base3++;
+
+                cs->_regTime = now;
+
+                if (g_verbose) {
+                    char timestr[30];
+                    log << "   client "
+                        << inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
+                        << " (" << clientipaddr << ") (re)registered at time "
+                        << ctime_r(&(cs->_regTime), timestr);
+                }
+
+                /// client might be already currently registered
+
+                /// if so, dont need to notify dr
+                if (cs->_state != CS_ST_REGISTERED) {
+                    notifyDR(clientipaddr);
+                }
+
+                // but always notify sp because we assume client is
+                // using new key materials
+                notifyProxy(clientipaddr, sharedkey, sizeof sharedkey);
+
+                cs->_state = CS_ST_REGISTERED;
+            }
+            else {
+//            log << "\n   ciphertext does not match" << endl;
+                // remove cs from map if client is not currently registered
+                if (cs->_state != CS_ST_REGISTERED) {
+                    g_clients.erase(clientipaddr);
+                }
             }
         }
     }
@@ -678,13 +849,18 @@ int main(int argc, char **argv)
     int opt;
     int long_index;
     u_short port = 0;
-    const char *seckeypath = NULL;
+    const char *seckeybase6path = NULL;
+    const char *seckeybase3path = NULL;
     const char *proxyip = NULL;
     u_short proxyctlport = 0;
     const char *drIP = NULL;
     u_short drCtlPort = 0;
     BIO *curvesecretfilebio = NULL;
     uint32_t garbagecollectioninterval = 0;
+    string srcAddrMaskValStr;
+    uint32_t srcAddrMask = 0;
+    uint32_t srcAddrVal = 0;
+    boost::hash<uint32_t> srcAddrHasher;
 
 	printf("Revision: %s\n\n", rcsid);
     for (int i = 0; i < argc; ++i) {
@@ -695,7 +871,6 @@ int main(int argc, char **argv)
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
         {"device", required_argument, 0, 1001},
-        {"curveseckey", required_argument, 0, 1002},
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
@@ -704,6 +879,14 @@ int main(int argc, char **argv)
         {"validationInterval", required_argument, 0, 1010}, // in seconds
         {"garbageCollectionInterval", required_argument, 0, 1011}, // in seconds
         {"bytesPerISN", required_argument, 0, 1012}, // either 3 or 4
+
+        // arg should be "<mask>/<val>", where both are decimal
+        // integers
+        {"partitionByHash", required_argument, 0, 1013},
+
+        {"seckey-base6", required_argument, 0, 1014},
+        {"seckey-base3", required_argument, 0, 1015},
+
         {0, 0, 0, 0},
     };
 
@@ -727,10 +910,6 @@ int main(int argc, char **argv)
 
         case 1001:
             dev = optarg;
-            break;
-
-        case 1002:
-            seckeypath = optarg;
             break;
 
         case 1003:
@@ -768,11 +947,34 @@ int main(int argc, char **argv)
             g_bytesPerISN = strtod(optarg, NULL);
             break;
 
+        case 1013:
+            srcAddrMaskValStr = optarg;
+            boost::trim(srcAddrMaskValStr);
+            assert(srcAddrMaskValStr.length() > 0);
+            break;
+
+        case 1014:
+            seckeybase6path = optarg;
+            break;
+
+        case 1015:
+            seckeybase3path = optarg;
+            break;
+
         default:
             print_app_usage();
             exit(-1);
             break;
         }
+    }
+
+    if (srcAddrMaskValStr.length() > 0) {
+        vector<string> tokens;
+        boost::split(tokens, srcAddrMaskValStr, boost::is_any_of("/"));
+        bail_require_msg(tokens.size() == 2, "must be \"<mask>/<val>\"");
+        srcAddrMask = boost::lexical_cast<uint32_t>(tokens[0]);
+        srcAddrVal = boost::lexical_cast<uint32_t>(tokens[1]);
+        printf("partition mask: 0x%X, value: 0x%X\n", srcAddrMask, srcAddrVal);
     }
 
     bail_require_msg(g_bytesPerISN == 3 || g_bytesPerISN == 4,
@@ -787,7 +989,10 @@ int main(int argc, char **argv)
 
     bail_require_msg(dev, "must specify --device");
 
-    if (!(seckeypath) || !proxyip || !proxyctlport) {
+    bail_require_msg(seckeybase6path != NULL, "must specify --seckey-base6");
+    bail_require_msg(seckeybase3path != NULL, "must specify --seckey-base3");
+
+    if (!proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
@@ -797,13 +1002,32 @@ int main(int argc, char **argv)
         filter_exp += lexical_cast<string>(port);
     }
 
-    curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+    // read in the secret keys
+    curvesecretfilebio = BIO_new_file(seckeybase6path, "rb");
     bail_null(curvesecretfilebio);
 
-    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+    bail_require_msg(
+        sizeof g_myseckeybase6 == BIO_read(
+            curvesecretfilebio, g_myseckeybase6, sizeof g_myseckeybase6),
+        "error reading secret base-6 key");
 
     if (g_verbose) {
-        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
+        print_hex_ascii_line("secret key base-6",
+                             g_myseckeybase6, sizeof g_myseckeybase6, 0);
+    }
+    openssl_safe_free(BIO, curvesecretfilebio);
+
+    curvesecretfilebio = BIO_new_file(seckeybase3path, "rb");
+    bail_null(curvesecretfilebio);
+
+    bail_require_msg(
+        sizeof g_myseckeybase3 == BIO_read(
+            curvesecretfilebio, g_myseckeybase3, sizeof g_myseckeybase3),
+        "error reading secret base-3 key");
+
+    if (g_verbose) {
+        print_hex_ascii_line("secret key base-3",
+                             g_myseckeybase3, sizeof g_myseckeybase3, 0);
     }
 
     /* create control socket to the proxy */
@@ -836,6 +1060,8 @@ int main(int argc, char **argv)
 	printf("Filter expression: %s\n", filter_exp.c_str());
     printf("g_validationInterval = %d\n", g_validationInterval);
     printf("garbagecollectioninterval = %d\n", garbagecollectioninterval);
+    printf("g_bytesPerISN = %u\n", g_bytesPerISN);
+    printf("g_numRequiredPkts = %u\n", g_numRequiredPkts);
 
 	/* open capture device */
     /* 15 second timeout */
@@ -884,14 +1110,32 @@ int main(int argc, char **argv)
         }
         packet = pcap_next(g_handle, &header);
         if (packet) {
-            got_packet(NULL, &header, packet);
+            // assumes there is enough captured data, and the pcap
+            // filter does its job correctly: that only ipv4 tcp syn
+            // packets are captured. so we dont check those things
+            // here.
+            const struct sniff_ip *ip = (struct sniff_ip*)(
+                packet + g_machdrlen);
+            const int iphdrlen = IP_HL(ip)*4;
+            const struct sniff_tcp *tcp = (struct sniff_tcp*)(
+                packet + g_machdrlen + iphdrlen);
+
+            // now filter out packets that are not in our partition
+            if (srcAddrMask != 0 &&
+                ((srcAddrHasher(ip->ip_src.s_addr) & srcAddrMask) != srcAddrVal))
+            {
+                continue;
+            }
+            got_packet2(ip->ip_src.s_addr, tcp->th_seq);
         }
     }
 
     printf("pktCount = %llu\n", g_pktCount);
     printf("cryptoCount = %llu\n", g_cryptoCount);
     printf("g_numClientsGarbageCollected = %llu\n", g_numClientsGarbageCollected);
-    printf("regCount = %llu\n", g_regCount);
+    printf("g_regCount = %llu\n", g_regCount);
+    printf("g_regCount_base6 = %llu\n", g_regCount_base6);
+    printf("g_regCount_base3 = %llu\n", g_regCount_base3);
 
 	/* cleanup */
 	pcap_freecode(&fp);
@@ -914,14 +1158,19 @@ void
 print_app_usage(void)
 {
 
-	printf("Usage: %s --curveseckey <curve25519 secret file>\n"
-           "          [--port <process SYNs on this port only>]\n"
+	printf("Usage: %s --seckey-base6 <path> --seckey-base3 <path>\n"
+           "          [--port <capture only this port>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --drIP ... --drCtlPort ... \n"
            "          --bytesPerISN <3 or 4> \n"
            "          --validationInterval <seconds> --garbageCollectionInterval <seconds>\n"
            "          --device interface\n", APP_NAME);
 	printf("\n");
+	printf("if partitionByHash is specified, the client's src ip address\n"
+           "will be hashed with boost::hash<uint32_t>, then masked with\n"
+           "the specified <mask>, and the packet is used only if the result\n"
+           "equals the <value after masked>.\n"
+        );
 
-return;
+    return;
 }

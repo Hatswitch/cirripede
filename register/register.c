@@ -20,6 +20,7 @@
 #include "openssl/err.h"
 #include "curve25519-20050915/curve25519.h"
 #include <math.h>
+#include <stdlib.h>
 
 static const char Id[] =
   "$Id$";
@@ -193,15 +194,32 @@ void gensecretkey(unsigned char secret[CURVE25519_KEYSIZE])
       exit(-1);
     }
   }
-  secret[0] &= 248;
-  secret[31] &= 127;
-  secret[31] |= 64;
+  /* secret[0] &= 248; */
+  secret[31] &= 127; /* keep this line */
+  /* secret[31] |= 64; */
 }
 
-void computepublickey(unsigned char pub[CURVE25519_KEYSIZE], const unsigned char secret[CURVE25519_KEYSIZE])
+/* return 0 on success */
+int computepublickey(unsigned char pub[CURVE25519_KEYSIZE],
+                     const unsigned char secret[CURVE25519_KEYSIZE],
+                     const int basepoint /* either 6 or 3 */
+  )
 {
-  static const unsigned char basepoint[CURVE25519_KEYSIZE] = {9};
-  curve25519(pub,secret,basepoint);
+
+  if (basepoint == 6) {
+    static const unsigned char basepoint6[CURVE25519_KEYSIZE] = {6};
+    curve25519(pub,secret, basepoint6);
+    return 0;
+  }
+  else if (basepoint == 3) {
+    static const unsigned char basepoint3[CURVE25519_KEYSIZE] = {3};
+    curve25519(pub,secret, basepoint3);
+    return 0;
+  }
+  else {
+    printf("basepoint must be 6 or 3\n");
+    return 1; // error
+  }
 }
 
 int
@@ -216,8 +234,8 @@ getciphertext(const u_char *sharedcurvekey,
   int err = 0;
   int retval = 0;
   static const char str[] = "register";
-  static const char syn[] = "syn";
-  static const char ack[] = "ack";
+  /* static const char syn[] = "syn"; */
+  /* static const char ack[] = "ack"; */
   BIO *ciphertextbio = NULL;
   BIO *benc = NULL;
   /// generate key and iv for cipher
@@ -260,25 +278,25 @@ getciphertext(const u_char *sharedcurvekey,
   retval = BIO_read(ciphertextbio, rsciphertext, 4);
   bail_require(retval == 4);
 
-  //////////////////////////
-  // now get the cipher text for signalling the proxy and the expected
-  // response
+  /* ////////////////////////// */
+  /* // now get the cipher text for signalling the proxy and the expected */
+  /* // response */
 
-  retval = BIO_write(benc, syn, strlen(syn));
-  bail_require(retval == strlen(syn));
-  bail_require(1 == BIO_flush(benc));
+  /* retval = BIO_write(benc, syn, strlen(syn)); */
+  /* bail_require(retval == strlen(syn)); */
+  /* bail_require(1 == BIO_flush(benc)); */
 
-  retval = BIO_read(ciphertextbio,
-                    proxysynciphertext, 4);
-  bail_require(retval == 4);
+  /* retval = BIO_read(ciphertextbio, */
+  /*                   proxysynciphertext, 4); */
+  /* bail_require(retval == 4); */
 
-  retval = BIO_write(benc, ack, strlen(ack));
-  bail_require(retval == strlen(ack));
-  bail_require(1 == BIO_flush(benc));
+  /* retval = BIO_write(benc, ack, strlen(ack)); */
+  /* bail_require(retval == strlen(ack)); */
+  /* bail_require(1 == BIO_flush(benc)); */
 
-  retval = BIO_read(ciphertextbio,
-                    proxyackciphertext, 4);
-  bail_require(retval == 4);
+  /* retval = BIO_read(ciphertextbio, */
+  /*                   proxyackciphertext, 4); */
+  /* bail_require(retval == 4); */
 
 
 bail:
@@ -300,20 +318,26 @@ int main(int argc, char *argv[])
 
   memset(buffer, 0, PCKT_LEN);
 
-  if(argc != 5)
+  if(argc != 6)
   {
     printf("- Invalid parameters!!!\n");
-    printf("- Usage: %s <target IP> <target port> <RS curve25519 pubkey file> <3 or 4 (bytes per ISN)?>\n", argv[0]);
+    printf("- Usage: %s <target IP> <target port> <RS pubkeyfile base-6> <RS pubkeyfile base-3> <3 or 4 (bytes per ISN)?>\n", argv[0]);
     printf("  - RS is 'registration server'\n");
     printf("  - the target is some host (might not even exist) such that our\n");
     printf("    packets are routed through to the registration server\n");
     exit(-1);
   }
 
-  const unsigned int bytesPerISN = strtod(argv[4], NULL);
+  const unsigned int bytesPerISN = strtod(argv[5], NULL);
   assert (bytesPerISN == 3 || bytesPerISN == 4);
 
-  BIO *rspubkeybio = BIO_new_file(argv[3], "rb");
+  int r;
+  assert(1 == RAND_bytes((unsigned char*)&r, sizeof r));
+  static const int basepoints[] = {6, 3};
+  const int basepoint = basepoints[r & 1];
+  printf("using basepoint %d\n", basepoint);
+
+  BIO *rspubkeybio = BIO_new_file(basepoint == 6 ? argv[3] : argv[4], "rb");
   bail_null_msg(rspubkeybio, "can't open RS pubkey file");
 
   u_char rspubkey[CURVE25519_KEYSIZE] = {0};
@@ -323,7 +347,10 @@ int main(int argc, char *argv[])
   u_char myseckey[CURVE25519_KEYSIZE] = {0};
   gensecretkey(myseckey);
   u_char mypubkey[CURVE25519_KEYSIZE] = {0};
-  computepublickey(mypubkey, myseckey);
+  if (computepublickey(mypubkey, myseckey, basepoint)) {
+    printf("error computing public key using base %d\n", basepoint);
+    exit(-1);
+  }
 
   u_char sharedkey[CURVE25519_KEYSIZE] = {0};
   curve25519(sharedkey, myseckey, rspubkey);
