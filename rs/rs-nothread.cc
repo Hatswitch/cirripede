@@ -230,7 +230,12 @@
 #include <vector>
 
 extern "C" {
+#ifdef USE64
+#include "../curve25519-donna-c64.c"
+int (*curve25519)(unsigned char *,const unsigned char *,const unsigned char *) = curve25519_donna;
+#else
 #include "curve25519-20050915/curve25519.h"
+#endif
 }
 
 static const char rcsid[] =
