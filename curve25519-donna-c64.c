@@ -25,6 +25,8 @@
 #include <string.h>
 #include <stdint.h>
 
+/* $Id$ */
+
 typedef uint8_t u8;
 typedef uint64_t limb;
 typedef limb felem[5];
@@ -408,9 +410,9 @@ curve25519_donna(u8 *mypublic, const u8 *secret, const u8 *basepoint) {
   int i;
 
   for (i = 0;i < 32;++i) e[i] = secret[i];
-  e[0] &= 248;
-  e[31] &= 127;
-  e[31] |= 64;
+  /* e[0] &= 248; */
+  e[31] &= 127; /* keep this line */
+  /* e[31] |= 64; */
 
   fexpand(bp, basepoint);
   cmult(x, z, e, bp);
