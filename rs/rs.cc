@@ -556,7 +556,8 @@ public:
 };
 
 
-static u_char g_myseckey[CURVE25519_KEYSIZE] = {0};
+static u_char g_myseckeybase6[CURVE25519_KEYSIZE] = {0};
+static u_char g_myseckeybase3[CURVE25519_KEYSIZE] = {0};
 static int g_proxyctlsocket = -1;
 static struct sockaddr_in g_proxyaddr;
 static int g_drCtlSocket = -1;
@@ -739,6 +740,7 @@ bail:
 }
 
 static const EVP_CIPHER *g_signallingcipher = EVP_aes_128_cbc();
+static const EVP_MD *g_signallinghash = EVP_sha1();
 static const u_char g_register_str[] = "register";
 #define REGISTER_STRLEN ((sizeof g_register_str) - 1)
 
@@ -789,6 +791,8 @@ handleSynPackets(const string& threadname,
     // statistics
     unsigned long long pktCount = 0; // num of pkts handled here
     unsigned long long regCount = 0; // num of successful registrations
+    unsigned long long regCount_base6 = 0;
+    unsigned long long regCount_base3 = 0;
     unsigned long long cryptoCount = 0; // num of times we need to do crypto ops
     unsigned long long numClientsGarbageCollected = 0; // cumulative
 
@@ -807,6 +811,8 @@ handleSynPackets(const string& threadname,
             MYLOGINFO(threadname << ": cryptoCount = " << cryptoCount);
             MYLOGINFO(threadname << ": numClientsGarbageCollected = " << numClientsGarbageCollected);
             MYLOGINFO(threadname << ": regCount = " << regCount);
+            MYLOGINFO(threadname << ": regCount_base6 = " << regCount_base6);
+            MYLOGINFO(threadname << ": regCount_base3 = " << regCount_base3);
             return;
         }
 
@@ -859,7 +865,7 @@ handleSynPackets(const string& threadname,
         if (cs->_pktcount == g_numRequiredPkts) {
             // we have enough packets --> detect signal
             u_char sharedkey[CURVE25519_KEYSIZE] = {0};
-            curve25519(sharedkey, g_myseckey, cs->_signal);
+            curve25519(sharedkey, g_myseckeybase6, cs->_signal);
 
             u_char kdf_data[(sizeof sharedkey) + 1];
             memcpy(kdf_data, sharedkey, sizeof sharedkey);
@@ -869,7 +875,8 @@ handleSynPackets(const string& threadname,
             u_char cipheriv[EVP_MAX_IV_LENGTH] = {0};
 
             int retval = EVP_BytesToKey(
-                g_signallingcipher, EVP_sha1(), NULL, kdf_data, sizeof kdf_data, 1,
+                g_signallingcipher, g_signallinghash,
+                NULL, kdf_data, sizeof kdf_data, 1,
                 cipherkey, cipheriv);
             bail_require(retval == g_signallingcipher->key_len);
 
@@ -903,8 +910,9 @@ handleSynPackets(const string& threadname,
             print_hex_ascii_line("pubkey+signal", cs->_signal, sizeof (cs->_signal), 0, &ss);
 #endif
 
-            if (0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+            if (!memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
                 regCount++;
+                regCount_base6++;
                 cs->_regTime = now;
 
                 if (g_verbose) {
@@ -922,48 +930,105 @@ handleSynPackets(const string& threadname,
                     notifyDR(ip);
                 }
 
-                // but always notify sp because we assume client is using new key materials
+                // but always notify sp because we assume client is
+                // using new key materials
                 notifyProxy(ip, sharedkey, sizeof sharedkey);
 
                 cs->_state = CS_ST_REGISTERED;
             }
             else {
-#if 0
-                if (numMisMatch++ < 10) {
-                    MYLOGINFO("   client "
-                              << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
-                              << " (" << ip << ") not matched: " << string(ss.str()));
-                    for (size_t i = 0; i < (cs->_synpkts.size()); ++i) {
-                        stringstream _ss;
-                        print_hex_ascii_line("tcp seq", cs->_synpkts[i]->_tcp_seq, g_bytesPerISN, 0, &_ss);
-                        MYLOGINFO(" synpkt num " << i << ": tv_sec = " << cs->_synpkts[i]->_ts.tv_sec
-                                  << ", tv_usec = " << cs->_synpkts[i]->_ts.tv_usec
-                                  << ", " << string(_ss.str()));
+                // no match using base-6, now try base-3
+                curve25519(sharedkey, g_myseckeybase3, cs->_signal);
+
+                if (g_verbose) {
+                    print_hex_ascii_line("sharedkey base-3",
+                                         sharedkey, sizeof sharedkey, 0);
+                }
+                memcpy(kdf_data, sharedkey, sizeof sharedkey);
+                kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
+
+                int retval = EVP_BytesToKey(
+                    g_signallingcipher, g_signallinghash,
+                    NULL, kdf_data, sizeof kdf_data, 1,
+                    cipherkey, cipheriv);
+                bail_require(retval == g_signallingcipher->key_len);
+
+                bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
+                                   g_register_str, REGISTER_STRLEN,
+                                   rsciphertext, sizeof rsciphertext));
+
+                if (!memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
+                    regCount++;
+                    regCount_base3++;
+
+                    if (g_verbose) {
+                        char timestr[30];
+                        MYLOGINFO("   client "
+                                  << inet_ntop(AF_INET, &ip, addrstr,
+                                               INET_ADDRSTRLEN)
+                                  << " (" << ip << ") (re)registered at time "
+                                  << ctime_r(&(cs->_regTime), timestr));
                     }
-                    for (size_t i = 0; i < (cs->_synpkts.size() - 1); ++i) {
-                        if (cs->_synpkts[i]->_ts.tv_sec > cs->_synpkts[i+1]->_ts.tv_sec ||
-                            ((cs->_synpkts[i]->_ts.tv_sec == cs->_synpkts[i+1]->_ts.tv_sec) &&
-                             (cs->_synpkts[i]->_ts.tv_usec > cs->_synpkts[i+1]->_ts.tv_usec)))
-                        {
-                            MYLOGINFO("   client "
-                                      << inet_ntop(AF_INET, &ip, addrstr, INET_ADDRSTRLEN)
-                                      << ": ERROR: synpkt " << i << " has larger timestamp "
-                                      << "than synpkt " << i+1);
+
+                    /// client might be already currently registered
+
+                    /// if so, dont need to notify dr
+                    if (cs->_state != CS_ST_REGISTERED) {
+                        notifyDR(ip);
+                    }
+
+                    // but always notify sp because we assume client
+                    // is using new key materials
+                    notifyProxy(ip, sharedkey, sizeof sharedkey);
+
+                    cs->_state = CS_ST_REGISTERED;
+                }
+                else {
+#if 0
+                    if (numMisMatch++ < 10) {
+                        MYLOGINFO(
+                            "   client "
+                            << inet_ntop(AF_INET, &ip, addrstr,
+                                         INET_ADDRSTRLEN)
+                            << " (" << ip << ") not matched: "
+                            << string(ss.str()));
+                        for (size_t i = 0; i < (cs->_synpkts.size()); ++i) {
+                            stringstream _ss;
+                            print_hex_ascii_line(
+                                "tcp seq", cs->_synpkts[i]->_tcp_seq,
+                                g_bytesPerISN, 0, &_ss);
+                            MYLOGINFO(
+                                " synpkt num " << i << ": tv_sec = "
+                                << cs->_synpkts[i]->_ts.tv_sec
+                                << ", tv_usec = "
+                                << cs->_synpkts[i]->_ts.tv_usec
+                                << ", " << string(_ss.str()));
+                        }
+                        for (size_t i = 0; i < (cs->_synpkts.size() - 1); ++i) {
+                            if (cs->_synpkts[i]->_ts.tv_sec > cs->_synpkts[i+1]->_ts.tv_sec ||
+                                ((cs->_synpkts[i]->_ts.tv_sec == cs->_synpkts[i+1]->_ts.tv_sec) &&
+                                 (cs->_synpkts[i]->_ts.tv_usec > cs->_synpkts[i+1]->_ts.tv_usec)))
+                            {
+                                MYLOGINFO(
+                                    "   client "
+                                    << inet_ntop(AF_INET, &ip, addrstr,
+                                                 INET_ADDRSTRLEN)
+                                    << ": ERROR: synpkt " << i
+                                    << " has larger timestamp "
+                                    << "than synpkt " << i+1);
+                            }
                         }
                     }
-                }
 #endif
-                // remove cs from map if client is not currently registered
-                if (cs->_state != CS_ST_REGISTERED) {
-                    clients.erase(ip);
+                    // remove cs from map if client is not currently registered
+                    if (cs->_state != CS_ST_REGISTERED) {
+                        clients.erase(ip);
+                    }
+                }
 #if 0
-                    MYLOGDEBUG("   client removed from map -> new map size: " << clients.size());
+                cs->_synpkts.clear();
 #endif
-                }
             }
-#if 0
-            cs->_synpkts.clear();
-#endif
         }
 bail:
         continue;
@@ -1004,7 +1069,8 @@ int main(int argc, char **argv)
     int opt;
     int long_index;
     u_short port = 0;
-    const char *seckeypath = NULL;
+    const char *seckeybase6path = NULL;
+    const char *seckeybase3path = NULL;
     const char *proxyip = NULL;
     u_short proxyctlport = 0;
     const char *drIP = NULL;
@@ -1023,7 +1089,6 @@ int main(int argc, char **argv)
     struct option long_options[] = {
         {"port", required_argument, 0, 1000},
         {"device", required_argument, 0, 1001},
-        {"curveseckey", required_argument, 0, 1002},
         {"proxyip", required_argument, 0, 1003},
         {"proxyctlport", required_argument, 0, 1004},
         {"verbose", no_argument, 0, 1005},
@@ -1033,6 +1098,8 @@ int main(int argc, char **argv)
         {"validationInterval", required_argument, 0, 1011}, // in seconds
         {"garbageCollectionInterval", required_argument, 0, 1012}, // in seconds
         {"bytesPerISN", required_argument, 0, 1013}, // either 3 or 4
+        {"seckey-base6", required_argument, 0, 1014},
+        {"seckey-base3", required_argument, 0, 1015},
         {0, 0, 0, 0},
     };
 
@@ -1056,10 +1123,6 @@ int main(int argc, char **argv)
 
         case 1001:
             dev = optarg;
-            break;
-
-        case 1002:
-            seckeypath = optarg;
             break;
 
         case 1003:
@@ -1102,6 +1165,14 @@ int main(int argc, char **argv)
             g_bytesPerISN = strtod(optarg, NULL);
             break;
 
+        case 1014:
+            seckeybase6path = optarg;
+            break;
+
+        case 1015:
+            seckeybase3path = optarg;
+            break;
+
         default:
             print_app_usage();
             exit(-1);
@@ -1118,6 +1189,9 @@ int main(int argc, char **argv)
     bail_require_msg(drCtlPort > 0, "must specify --drCtlPort");
     bail_require_msg(dev != NULL, "must specify --device");
 
+    bail_require_msg(seckeybase6path != NULL, "must specify --seckey-base6");
+    bail_require_msg(seckeybase3path != NULL, "must specify --seckey-base3");
+
     bail_require_msg(g_validationInterval != 0,
                      "must specify --validationInterval");
     bail_require_msg(g_garbagecollectioninterval.total_seconds() != 0,
@@ -1125,7 +1199,7 @@ int main(int argc, char **argv)
 
     bail_require_msg(ISPOWEROF2(numThreads), "numThreads must be power of 2");
 
-    if (!(seckeypath) || !proxyip || !proxyctlport) {
+    if (!proxyip || !proxyctlport) {
         print_app_usage();
         exit(-1);
     }
@@ -1135,13 +1209,32 @@ int main(int argc, char **argv)
         filter_exp += lexical_cast<string>(port);
     }
 
-    curvesecretfilebio = BIO_new_file(seckeypath, "rb");
+    // read in the secret keys
+    curvesecretfilebio = BIO_new_file(seckeybase6path, "rb");
     bail_null(curvesecretfilebio);
 
-    bail_require_msg(sizeof g_myseckey == BIO_read(curvesecretfilebio, g_myseckey, sizeof g_myseckey), "error reading secret curve key");
+    bail_require_msg(
+        sizeof g_myseckeybase6 == BIO_read(
+            curvesecretfilebio, g_myseckeybase6, sizeof g_myseckeybase6),
+        "error reading secret base-6 key");
 
     if (g_verbose) {
-        print_hex_ascii_line("secret key", g_myseckey, sizeof g_myseckey, 0);
+        print_hex_ascii_line("secret key base-6",
+                             g_myseckeybase6, sizeof g_myseckeybase6, 0);
+    }
+    openssl_safe_free(BIO, curvesecretfilebio);
+
+    curvesecretfilebio = BIO_new_file(seckeybase3path, "rb");
+    bail_null(curvesecretfilebio);
+
+    bail_require_msg(
+        sizeof g_myseckeybase3 == BIO_read(
+            curvesecretfilebio, g_myseckeybase3, sizeof g_myseckeybase3),
+        "error reading secret base-3 key");
+
+    if (g_verbose) {
+        print_hex_ascii_line("secret key base-3",
+                             g_myseckeybase3, sizeof g_myseckeybase3, 0);
     }
 
     // Set up a simple configuration that logs on the console.
@@ -1259,8 +1352,9 @@ void
 print_app_usage(void)
 {
 
-    printf("Usage: %s [--curveseckey <curve25519 secret file>]\n"
-           "          [--port <port>]\n"
+    printf("Usage: %s --seckey-base6 <path>\n"
+           "          --seckey-base3 <path>\n"
+           "          [--port <capture this port only>]\n"
            "          --proxyip ... --proxyctlport ... \n"
            "          --drIP ... --drCtlPort ... \n"
            "          --bytesPerISN ... \n"
