@@ -479,142 +479,10 @@ bail:
 }
 
 void
-got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
-
-void
 print_app_usage(void);
 
-#if 0
 void
-got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
-{
-	const struct sniff_ip *ip;              /* The IP header */
-	const struct sniff_tcp *tcp;            /* The TCP header */
-	int tcphdrlen;
-    uint32_t clientipaddr;
-    shared_ptr<ClientState_t> cs;
-    time_t now;
-    char addrstr[INET_ADDRSTRLEN];
-
-    ip = (struct sniff_ip*)(packet + g_machdrlen);
-    const int iphdrlen = IP_HL(ip)*4;
-
-    bail_require_msg(iphdrlen >= 20, "* Invalid IP header length");
-    bail_require_msg(ip->ip_p == IPPROTO_TCP, "getting non-TCP packets");
-
-	/*
-	 *  OK, this packet is TCP.
-	 */
-
-    /* define/compute tcp header offset */
-    tcp = (struct sniff_tcp*)(packet + g_machdrlen + iphdrlen);
-    tcphdrlen = TH_OFF(tcp)*4;
-    bail_require_msg(tcphdrlen >= 20, "* Invalid TCP header length");
-    bail_require_msg(tcp->th_flags == TH_SYN, "getting non-SYN packets");
-
-    g_pktCount ++;
-
-    clientipaddr = ip->ip_src.s_addr;
-
-    if (Common::inMap(g_clients, clientipaddr)) {
-        cs = g_clients[clientipaddr];
-    }
-    else {
-        cs = make_shared<ClientState_t>();
-        // put it into the map
-        g_clients[clientipaddr] = cs;
-        // struct in_addr tmp;
-        // tmp.s_addr = ip;
-        // log << " new pending client ip: " << inet_ntoa(tmp) << endl;
-        // log << "new map size: " << clients.size() << endl;
-    }
-
-    ///// at this point, cs is a valid entry in the map /////
-
-    // update last seen
-    now = time(NULL);
-    cs->_lastSeen = now;
-
-    // increment first
-    cs->_pktcount += 1;
-
-    memcpy(cs->_signal + ((cs->_pktcount - 1) * g_bytesPerISN),
-           &(tcp->th_seq), g_bytesPerISN);
-
-    if (cs->_pktcount == g_numRequiredPkts) {
-        // we have enough packets --> detect signal
-        u_char sharedkey[CURVE25519_KEYSIZE];
-        curve25519(sharedkey, g_myseckeybase6, cs->_signal);
-
-        if (g_verbose) {
-            print_hex_ascii_line("sharedkey base-6",
-                                 sharedkey, sizeof sharedkey, 0);
-        }
-        u_char kdf_data[(sizeof sharedkey) + 1];
-        memcpy(kdf_data, sharedkey, sizeof sharedkey);
-        kdf_data[(sizeof kdf_data) - 1] = '1'; // '1' for signalling
-
-        u_char cipherkey[EVP_MAX_KEY_LENGTH];
-        u_char cipheriv[EVP_MAX_IV_LENGTH];
-
-        int retval = EVP_BytesToKey(
-            g_signallingcipher, g_signallinghash,
-            NULL, kdf_data, sizeof kdf_data, 1,
-            cipherkey, cipheriv);
-        bail_require(retval == g_signallingcipher->key_len);
-
-        u_char rsciphertext[4];
-        bail_error(encrypt(g_signallingcipher, cipherkey, cipheriv,
-                           g_register_str, REGISTER_STRLEN,
-                           rsciphertext, sizeof rsciphertext));
-
-        g_cryptoCount ++;
-
-        // reset pkt count
-        cs->_pktcount = 0;
-
-        if (0 == memcmp(rsciphertext, cs->_signal + CURVE25519_KEYSIZE, 4)) {
-            g_regCount++;
-            g_regCount_base6++;
-
-            cs->_regTime = now;
-
-            if (g_verbose) {
-                char timestr[30];
-                log << "   client "
-                    << inet_ntop(AF_INET, &clientipaddr, addrstr, INET_ADDRSTRLEN)
-                    << " (" << clientipaddr << ") (re)registered at time "
-                    << ctime_r(&(cs->_regTime), timestr);
-            }
-
-            /// client might be already currently registered
-
-            /// if so, dont need to notify dr
-            if (cs->_state != CS_ST_REGISTERED) {
-                notifyDR(clientipaddr);
-            }
-
-            // but always notify sp because we assume client is using new key materials
-            notifyProxy(clientipaddr, sharedkey, sizeof sharedkey);
-
-            cs->_state = CS_ST_REGISTERED;
-        }
-        else {
-//            log << "\n   ciphertext does not match" << endl;
-            // remove cs from map if client is not currently registered
-            if (cs->_state != CS_ST_REGISTERED) {
-                g_clients.erase(clientipaddr);
-            }
-        }
-    }
-
-bail:
-    return;
-}
-#endif
-
-void
-got_packet2(const uint32_t& clientipaddr, const uint32_t& ISN)
+got_packet(const uint32_t& clientipaddr, const uint32_t& ISN)
 {
     shared_ptr<ClientState_t> cs;
     time_t now;
@@ -624,12 +492,21 @@ got_packet2(const uint32_t& clientipaddr, const uint32_t& ISN)
 
     if (Common::inMap(g_clients, clientipaddr)) {
         cs = g_clients[clientipaddr];
-        assert (cs);
         // XXX/hmm when replaying the SYNonly100K trace at top speed
         // against rs-nothread, it would crash at cs->_lastSeen
         // ... below because cs is null, which is tracked here, where
         // the clientipaddr never was added to the map, yet inMap
         // returns true
+
+        // work around this here.
+        if (!cs) {
+            log << "WARN: inMap says client is in g_clients, but the client "
+                << "state is NULL" << endl;
+            cs = make_shared<ClientState_t>();
+            assert (cs);
+            // put it into the map
+            g_clients[clientipaddr] = cs;
+        }
     }
     else {
         cs = make_shared<ClientState_t>();
@@ -1138,7 +1015,7 @@ int main(int argc, char **argv)
             {
                 continue;
             }
-            got_packet2(ip->ip_src.s_addr, tcp->th_seq);
+            got_packet(ip->ip_src.s_addr, tcp->th_seq);
         }
     }
 
