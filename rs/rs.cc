@@ -228,6 +228,7 @@
 #include <log4cxx/layout.h>
 #include <log4cxx/patternlayout.h>
 #include <sys/prctl.h>
+#include <boost/functional/hash.hpp>
 
 extern "C" {
 #ifdef USE64
@@ -555,6 +556,7 @@ public:
 #endif
 };
 
+#define MAX_THREADS (8)
 
 static u_char g_myseckeybase6[CURVE25519_KEYSIZE] = {0};
 static u_char g_myseckeybase3[CURVE25519_KEYSIZE] = {0};
@@ -564,7 +566,7 @@ static int g_drCtlSocket = -1;
 static struct sockaddr_in g_drAddr;
 bool g_verbose = false;
 static unsigned long long g_pktcount = 0;
-static vector<boost::thread *> g_handlerthreads;
+static shared_ptr<boost::thread> g_handlerthreads[MAX_THREADS];
 static uint16_t g_validationInterval = 0;
 static uint32_t g_bytesPerISN = 0;
 static uint32_t g_numRequiredPkts = 0;
@@ -576,8 +578,7 @@ static uint32_t g_ipmask = 0;
 
 #define MASK_IP(ip) ((ip) & g_ipmask)
 
-// map from masked IP address to the syn packet queue
-static map<uint32_t, shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > > g_SYNqueues;
+static shared_ptr<ThreadSafeQueue<shared_ptr<SynPacket_t> > > g_SYNqueues[MAX_THREADS];
 
 static time_duration g_garbagecollectioninterval = boost::posix_time::seconds(0);
 
@@ -642,6 +643,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     shared_ptr<SynPacket_t> synpkt;
     int size_ip;
     int size_tcp;
+    static boost::hash<uint32_t> srcAddrHasher;
     
     g_pktcount ++;
 
@@ -685,7 +687,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 #endif
 
     // put it into the appropriate queue
-    g_SYNqueues[ MASK_IP(ip->ip_src.s_addr) ]->put(synpkt);
+    g_SYNqueues[ MASK_IP(srcAddrHasher(ip->ip_src.s_addr)) ]->put(synpkt);
 
 bail:
     return;
@@ -1044,8 +1046,12 @@ void signal_callback_handler(int signum)
     MYLOGINFO("waiting for handler threads to finish");
     g_terminate = true;
 
-    for (u_int i = 0; i < g_handlerthreads.size(); ++i) {
-        g_handlerthreads[i]->join();
+#define ARRAY_LEN(array) (sizeof(array) / sizeof((array)[0]))
+
+    for (u_int i = 0; i < ARRAY_LEN(g_handlerthreads); ++i) {
+        if (g_handlerthreads[i]) {
+            g_handlerthreads[i]->join();
+        }
     }
 
     MYLOGINFO("g_pktcount = " << g_pktcount);
@@ -1307,16 +1313,14 @@ int main(int argc, char **argv)
     for (int i = 0; i < numThreads; ++i) {
         // create a clients table for each thread
 
-        // partition the clients based on last 16 bits of ip address.
-        uint32_t masked_ip = (i << 15);
-        assert ((masked_ip & 1) == 0); // make sure 1's are not shifted in
-
-        g_SYNqueues[masked_ip] = make_shared<ThreadSafeQueue<shared_ptr<SynPacket_t> > >();
+        // partition the clients based on least significant bits of ip
+        // address (specifically hash of it).
+        g_SYNqueues[i] = make_shared<ThreadSafeQueue<shared_ptr<SynPacket_t> > >();
 
         // XXX/leakin
-        g_handlerthreads.push_back(new boost::thread(
-                                       handleSynPackets, "rs-" + boost::lexical_cast<string>(masked_ip),
-                                       g_SYNqueues[masked_ip]));
+        g_handlerthreads[i] = make_shared<boost::thread>(
+            handleSynPackets, "rs-" + boost::lexical_cast<string>(i),
+            g_SYNqueues[i]);
     }
 
     signal(SIGHUP, signal_callback_handler);
@@ -1324,7 +1328,8 @@ int main(int argc, char **argv)
     signal(SIGTERM, signal_callback_handler);
 
     // set up the ip mask
-    g_ipmask = (numThreads - 1) << 15;
+    g_ipmask = (numThreads - 1); // expecting numThreads to be power
+                                 // of 2
     MYLOGINFO("g_ipmask = " << g_ipmask);
     MYLOGINFO("g_validationInterval = " << g_validationInterval);
     MYLOGINFO("g_garbagecollectioninterval = " << g_garbagecollectioninterval.total_seconds());
