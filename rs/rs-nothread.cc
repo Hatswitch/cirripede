@@ -749,7 +749,7 @@ int main(int argc, char **argv)
     string srcAddrMaskValStr;
     uint32_t srcAddrMask = 0;
     uint32_t srcAddrVal = 0;
-    boost::hash<uint32_t> srcAddrHasher;
+    boost::hash<string> srcAddrHasher;
 
 	printf("Revision: %s\n\n", rcsid);
     for (int i = 0; i < argc; ++i) {
@@ -1011,7 +1011,7 @@ int main(int argc, char **argv)
 
             // now filter out packets that are not in our partition
             if (srcAddrMask != 0 &&
-                ((srcAddrHasher(ip->ip_src.s_addr) & srcAddrMask) != srcAddrVal))
+                ((srcAddrHasher(lexical_cast<string>(ip->ip_src.s_addr)) & srcAddrMask) != srcAddrVal))
             {
                 continue;
             }

@@ -643,7 +643,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
     shared_ptr<SynPacket_t> synpkt;
     int size_ip;
     int size_tcp;
-    static boost::hash<uint32_t> srcAddrHasher;
+    static boost::hash<string> srcAddrHasher;
     
     g_pktcount ++;
 
@@ -687,7 +687,7 @@ got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 #endif
 
     // put it into the appropriate queue
-    g_SYNqueues[ MASK_IP(srcAddrHasher(ip->ip_src.s_addr)) ]->put(synpkt);
+    g_SYNqueues[ MASK_IP(srcAddrHasher(lexical_cast<string>(ip->ip_src.s_addr))) ]->put(synpkt);
 
 bail:
     return;
