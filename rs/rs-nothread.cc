@@ -624,6 +624,7 @@ got_packet2(const uint32_t& clientipaddr, const uint32_t& ISN)
 
     if (Common::inMap(g_clients, clientipaddr)) {
         cs = g_clients[clientipaddr];
+        assert (cs);
         // XXX/hmm when replaying the SYNonly100K trace at top speed
         // against rs-nothread, it would crash at cs->_lastSeen
         // ... below because cs is null, which is tracked here, where
@@ -632,6 +633,7 @@ got_packet2(const uint32_t& clientipaddr, const uint32_t& ISN)
     }
     else {
         cs = make_shared<ClientState_t>();
+        assert (cs);
         // put it into the map
         g_clients[clientipaddr] = cs;
     }
